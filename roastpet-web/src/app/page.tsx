@@ -1,626 +1,340 @@
 "use client";
 
-import { useState } from 'react';
-import { BODIES, HATS, SPECIES, renderSprite } from './sprites';
+import { useEffect, useMemo, useState } from "react";
+import { BODIES, HATS, SPECIES, renderSprite } from "./sprites";
 
+type HatchResponse = {
+  success: boolean;
+  token: string;
+  existingPet?: boolean;
+  command: string;
+  desktopCommand?: string;
+  starter: {
+    species: string;
+    hat: string;
+    eye: string;
+    githubLevel: string;
+    starterTitle: string;
+    starterFlavor: string;
+    score: number;
+  };
+};
 
+type PreviewPet = {
+  species: string;
+  hat: string;
+  eye: string;
+  rarity: number;
+  shiny: boolean;
+  name: string;
+  stats: number[];
+  topStatIdx: number;
+};
 
-export default function Dashboard() {
-  const [species, setSpecies] = useState('duck');
-  const [roastLevel, setRoastLevel] = useState('sarcastic');
-  const [apiKey, setApiKey] = useState('');
-  const [hat, setHat] = useState('none');
-  const [eye, setEye] = useState('o');
-  const [command, setCommand] = useState<string | null>(null);
+type BrowserSpeechWindow = Window & {
+  webkitSpeechRecognition?: new () => {
+    lang: string;
+    interimResults: boolean;
+    maxAlternatives: number;
+    onresult: ((event: { results: { transcript: string }[][] }) => void) | null;
+    onerror: (() => void) | null;
+    onend: (() => void) | null;
+    start: () => void;
+  };
+  SpeechRecognition?: new () => {
+    lang: string;
+    interimResults: boolean;
+    maxAlternatives: number;
+    onresult: ((event: { results: { transcript: string }[][] }) => void) | null;
+    onerror: (() => void) | null;
+    onend: (() => void) | null;
+    start: () => void;
+  };
+};
+
+type RemoteCommandStatus = {
+  id: string;
+  text: string;
+  status: "queued" | "picked" | "working" | "done" | "failed" | "canceled";
+  statusMessage: string;
+  createdAt: string;
+};
+
+type PetPresence = {
+  token: string;
+  species: string;
+  surface: string;
+  lastSeenAt: string;
+  status: string;
+  online: boolean;
+};
+
+const RARITIES = ["Common", "Uncommon", "Rare", "Epic", "Legendary"];
+const STAT_NAMES = ["DEBUGGING", "PATIENCE", "CHAOS", "WISDOM", "SNARK"];
+const STAT_COLORS = ["#378add", "#1d9e75", "#d85a30", "#7f77dd", "#d4537e"];
+const EYES = ["·", "o", "*", "@", "^", "~", "•", "x"];
+const NAMES = ["Pixel", "Glitch", "Null", "Hexie", "Bugsy", "Nano", "Luma", "Fizz", "Chip", "Flux", "Zap", "Patch"];
+const QUIPS = [
+  "Waiting for your next commit...",
+  "undefined is not a feeling.",
+  "git blame says it was you.",
+  "Your code smells like talent.",
+  "Compiling happiness...",
+];
+const ASK_LINES = [
+  "Should you refactor? Yes. Dramatically.",
+  "That 400-line function is probably load-bearing now.",
+  "Stack Overflow is just shared trauma with snippets.",
+  "Your best bug fix is still ahead of you, trainer.",
+];
+
+function hash(input: string) {
+  let value = 5381;
+  for (let i = 0; i < input.length; i += 1) value = ((value << 5) + value) ^ input.charCodeAt(i);
+  return Math.abs(value);
+}
+
+function seeded(seed: string, key: string) {
+  return (hash(seed + key) % 1000) / 1000;
+}
+
+function previewFromUsername(username: string): PreviewPet {
+  const seed = username.toLowerCase().trim() || "default";
+  const rarity = seeded(seed, "rarity") < 0.01 ? 4 : seeded(seed, "rarity") < 0.05 ? 3 : seeded(seed, "rarity") < 0.15 ? 2 : seeded(seed, "rarity") < 0.4 ? 1 : 0;
+  const pool = SPECIES.slice(0, Math.max(6, Math.min(SPECIES.length, 6 + rarity * 3)));
+  const species = pool[Math.floor(seeded(seed, "species") * pool.length)] || "duck";
+  const hatKeys = Object.keys(HATS);
+  const hat = rarity === 0 ? "none" : hatKeys[Math.floor(seeded(seed, "hat") * hatKeys.length)] || "none";
+  const eye = EYES[Math.floor(seeded(seed, "eye") * EYES.length)] || "o";
+  const stats = STAT_NAMES.map((stat) => Math.floor(seeded(seed, stat) * 99) + 1);
+  return {
+    species,
+    hat,
+    eye,
+    rarity,
+    shiny: seeded(seed, "shiny") < 0.01,
+    name: NAMES[Math.floor(seeded(seed, "name") * NAMES.length)] || "Pixel",
+    stats,
+    topStatIdx: stats.indexOf(Math.max(...stats)),
+  };
+}
+
+export default function Page() {
+  const [username, setUsername] = useState("devuser42");
+  const [apiKey, setApiKey] = useState("");
+  const [roastLevel, setRoastLevel] = useState("chaotic");
+  const [commandToken, setCommandToken] = useState("");
+  const [remoteCommand, setRemoteCommand] = useState("");
+  const [remoteStatus, setRemoteStatus] = useState("");
+  const [commandHistory, setCommandHistory] = useState<RemoteCommandStatus[]>([]);
+  const [presence, setPresence] = useState<PetPresence | null>(null);
+  const [listening, setListening] = useState(false);
+  const [pendingVoiceCommand, setPendingVoiceCommand] = useState("");
+  const [rawTranscript, setRawTranscript] = useState("");
+  const [preview, setPreview] = useState<PreviewPet>(() => previewFromUsername("devuser42"));
+  const [bubble, setBubble] = useState(QUIPS[0]);
+  const [result, setResult] = useState<HatchResponse | null>(null);
+  const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [anim, setAnim] = useState(false);
+  const [frame, setFrame] = useState(0);
+  const [askIndex, setAskIndex] = useState(0);
 
-  const handleGenerate = async () => {
-    setLoading(true);
-    try {
-      const res = await fetch('/api/pets/create', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ species, roastLevel, apiKey, hat, eye })
-      });
-      const data = await res.json();
-      if (data.token) {
-        setCommand(`cd .. && pip install -e ./roastpet_cli && python -m roastpet_cli --token ${data.token}`);
+  useEffect(() => {
+    setPreview(previewFromUsername(username));
+  }, [username]);
+
+  useEffect(() => {
+    if (!anim) {
+      setFrame(0);
+      return;
+    }
+    const timer = window.setInterval(() => {
+      setFrame((prev) => (prev + 1) % (BODIES[preview.species]?.length || 1));
+    }, 440);
+    return () => window.clearInterval(timer);
+  }, [anim, preview.species]);
+
+  useEffect(() => {
+    if (!commandToken) return;
+    const timer = window.setInterval(async () => {
+      try {
+        const [statusResponse, presenceResponse] = await Promise.all([
+          fetch(`/api/commands/status?token=${encodeURIComponent(commandToken)}`),
+          fetch(`/api/pets/presence?token=${encodeURIComponent(commandToken)}`),
+        ]);
+        const statusData = await statusResponse.json();
+        const presenceData = await presenceResponse.json();
+        if (statusResponse.ok) {
+          setCommandHistory((statusData.commands || []) as RemoteCommandStatus[]);
+        }
+        if (presenceResponse.ok) {
+          setPresence((presenceData.presence || null) as PetPresence | null);
+        }
+      } catch {
+        // ignore polling hiccups
       }
-    } catch (e) {
-      console.error(e);
+    }, 2500);
+    return () => window.clearInterval(timer);
+  }, [commandToken]);
+
+  const sprite = useMemo(() => renderSprite(preview, frame), [preview, frame]);
+
+  async function hatch() {
+    setLoading(true);
+    setError("");
+    try {
+      const response = await fetch("/api/pets/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, apiKey, roastLevel }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Hatch failed");
+      const hatchData = data as HatchResponse;
+      setResult(hatchData);
+      setCommandToken(hatchData.token);
+      setPreview((prev) => ({
+        ...prev,
+        species: hatchData.starter.species,
+        hat: hatchData.starter.hat,
+        eye: hatchData.starter.eye,
+      }));
+      setBubble(hatchData.starter.starterFlavor);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Hatch failed");
     } finally {
       setLoading(false);
     }
-  };
+  }
 
-  const spritePreview = renderSprite({ species, eye, hat }, 0);
+  async function sendRemoteCommand(text: string) {
+    const finalText = text.trim();
+    if (!commandToken || !finalText) return;
+    setRemoteStatus("Sending remote command...");
+    try {
+      const response = await fetch("/api/commands/send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: commandToken, text: finalText, source: "browser-voice" }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Failed to send command");
+      setRemoteStatus("Command sent. Pet will pick it up in a few seconds.");
+      setCommandHistory((prev) => [data.command as RemoteCommandStatus, ...prev].slice(0, 8));
+      setRemoteCommand("");
+    } catch (err) {
+      setRemoteStatus(err instanceof Error ? err.message : "Failed to send command");
+    }
+  }
+
+  async function cancelRemoteCommand(id: string) {
+    try {
+      const response = await fetch("/api/commands/status", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id, cancel: true }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Cancel failed");
+      setRemoteStatus("Command canceled.");
+      setCommandHistory((prev) => prev.map((entry) => (entry.id === id ? (data.command as RemoteCommandStatus) : entry)));
+    } catch (err) {
+      setRemoteStatus(err instanceof Error ? err.message : "Cancel failed");
+    }
+  }
+
+  async function interpretTranscript(transcript: string) {
+    const response = await fetch("/api/commands/interpret", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token: commandToken, transcript }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "Interpretation failed");
+    return data as { cleanedCommand: string; detectedLanguage: string; confidence: number };
+  }
+
+  function startVoiceCommand() {
+    const browserWindow = window as BrowserSpeechWindow;
+    const SpeechRecognitionCtor = browserWindow.webkitSpeechRecognition || browserWindow.SpeechRecognition;
+
+    if (!SpeechRecognitionCtor) {
+      setRemoteStatus("This browser does not support in-browser speech recognition.");
+      return;
+    }
+
+    const recognition = new SpeechRecognitionCtor();
+    recognition.lang = "hi-IN";
+    recognition.interimResults = false;
+    recognition.maxAlternatives = 1;
+    setListening(true);
+    setRemoteStatus("Listening in Hindi / Hinglish / English...");
+
+    recognition.onresult = async (event) => {
+      const transcript = event.results?.[0]?.[0]?.transcript || "";
+      setListening(false);
+      setRawTranscript(transcript);
+      setRemoteStatus(`Heard: ${transcript}`);
+      if (!transcript.trim()) return;
+      try {
+        const interpreted = await interpretTranscript(transcript);
+        setPendingVoiceCommand(interpreted.cleanedCommand || transcript);
+        setRemoteCommand(interpreted.cleanedCommand || transcript);
+        setRemoteStatus(`Heard: ${transcript} | Cleaned: ${interpreted.cleanedCommand}`);
+      } catch (err) {
+        setPendingVoiceCommand(transcript);
+        setRemoteCommand(transcript);
+        setRemoteStatus(err instanceof Error ? err.message : `Heard: ${transcript}`);
+      }
+    };
+
+    recognition.onerror = () => {
+      setListening(false);
+      setRemoteStatus("Voice capture failed. Try again or type the command.");
+    };
+
+    recognition.onend = () => {
+      setListening(false);
+    };
+
+    recognition.start();
+  }
 
   return (
     <>
-      <style jsx global>{`
-        :root {
-          --bg: #0d0d0d;
-          --surface: #141414;
-          --surface2: #1c1c1c;
-          --border: #2a2a2a;
-          --border2: #383838;
-          --text: #e8e4d8;
-          --text2: #8a8678;
-          --text3: #504e48;
-          --amber: #f0a035;
-          --amber2: #c47a18;
-          --amber-dim: #2a1f0a;
-          --green: #3ecf6e;
-          --green-dim: #0a1f12;
-          --blue: #5599ee;
-          --pink: #e0608a;
-          --purple: #9b87e8;
-          --font-mono: 'Berkeley Mono', monospace;
-          --font-body: 'DM Sans', sans-serif;
-          --font-serif: 'Instrument Serif', serif;
-          --r: 8px;
-          --r2: 14px;
-        }
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        html { scroll-behavior: smooth; }
-        body { background: var(--bg); color: var(--text); font-family: var(--font-body); font-size: 15px; line-height: 1.6; overflow-x: hidden; }
-        ::selection { background: var(--amber); color: #000; }
-        a { color: inherit; text-decoration: none; }
-
-        nav {
-          position: fixed;
-          top: 0;
-          left: 0;
-          right: 0;
-          z-index: 100;
-          height: 56px;
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          padding: 0 2rem;
-          border-bottom: 0.5px solid var(--border);
-          background: rgba(13, 13, 13, 0.85);
-          backdrop-filter: blur(12px);
-        }
-        .nav-logo { font-family: var(--font-mono); font-size: 14px; color: var(--amber); letter-spacing: .05em; }
-        .nav-links { display: flex; gap: 1.5rem; font-size: 13px; color: var(--text2); }
-        .nav-links a:hover { color: var(--text); }
-        .nav-cta {
-          font-size: 13px;
-          padding: 6px 14px;
-          border: 0.5px solid var(--amber);
-          border-radius: var(--r);
-          color: var(--amber);
-          cursor: pointer;
-          transition: all .2s;
-          background: transparent;
-        }
-        .nav-cta:hover { background: var(--amber); color: #000; }
-
-        .hero {
-          min-height: 100vh;
-          display: flex;
-          flex-direction: column;
-          align-items: center;
-          justify-content: center;
-          text-align: center;
-          padding: 5rem 1.5rem 4rem;
-          position: relative;
-          overflow: hidden;
-        }
-        .hero-grid {
-          position: absolute;
-          inset: 0;
-          background-image: linear-gradient(var(--border) 1px, transparent 1px), linear-gradient(90deg, var(--border) 1px, transparent 1px);
-          background-size: 60px 60px;
-          opacity: .25;
-          pointer-events: none;
-        }
-        .hero-glow {
-          position: absolute;
-          width: 600px;
-          height: 600px;
-          border-radius: 50%;
-          background: radial-gradient(circle, rgba(240, 160, 53, .07) 0%, transparent 70%);
-          top: 50%;
-          left: 50%;
-          transform: translate(-50%, -60%);
-          pointer-events: none;
-        }
-        .hero-eyebrow {
-          font-family: var(--font-mono);
-          font-size: 11px;
-          letter-spacing: .15em;
-          color: var(--amber);
-          border: 0.5px solid var(--amber-dim);
-          background: var(--amber-dim);
-          padding: 4px 12px;
-          border-radius: 20px;
-          margin-bottom: 1.5rem;
-          display: inline-block;
-        }
-        .hero h1 {
-          font-family: var(--font-serif);
-          font-size: clamp(2.8rem, 7vw, 5.5rem);
-          font-weight: 400;
-          line-height: 1.1;
-          margin-bottom: 1.25rem;
-          letter-spacing: -.01em;
-        }
-        .hero h1 em { font-style: italic; color: var(--amber); }
-        .hero-sub {
-          font-size: 16px;
-          color: var(--text2);
-          max-width: 480px;
-          line-height: 1.7;
-          margin-bottom: 2.5rem;
-        }
-        .hero-actions {
-          display: flex;
-          gap: 12px;
-          flex-wrap: wrap;
-          justify-content: center;
-          margin-bottom: 3.5rem;
-        }
-        .btn-primary {
-          padding: 11px 24px;
-          background: var(--amber);
-          color: #000;
-          border: none;
-          border-radius: var(--r);
-          font-family: var(--font-body);
-          font-size: 14px;
-          font-weight: 500;
-          cursor: pointer;
-          transition: all .2s;
-        }
-        .btn-primary:hover { background: #e8941f; transform: translateY(-1px); }
-        .btn-ghost {
-          padding: 11px 24px;
-          background: transparent;
-          color: var(--text);
-          border: 0.5px solid var(--border2);
-          border-radius: var(--r);
-          font-family: var(--font-body);
-          font-size: 14px;
-          cursor: pointer;
-          transition: all .2s;
-        }
-        .btn-ghost:hover { border-color: var(--text2); background: var(--surface); }
-
-        .hero-sprites {
-          display: flex;
-          gap: 12px;
-          flex-wrap: wrap;
-          justify-content: center;
-          opacity: .7;
-        }
-        .hero-sprite-card {
-          background: var(--surface);
-          border: 0.5px solid var(--border);
-          border-radius: var(--r);
-          padding: 10px 14px;
-        }
-        .hero-sprite-card pre {
-          font-family: var(--font-mono);
-          font-size: 9px;
-          line-height: 1.45;
-          color: var(--text2);
-          white-space: pre;
-        }
-
-        .strip {
-          border-top: 0.5px solid var(--border);
-          border-bottom: 0.5px solid var(--border);
-          background: var(--surface);
-          padding: 12px 0;
-          overflow: hidden;
-          position: relative;
-        }
-        .strip-inner {
-          display: flex;
-          gap: 2.5rem;
-          white-space: nowrap;
-          animation: marquee 28s linear infinite;
-        }
-        .strip-item {
-          font-family: var(--font-mono);
-          font-size: 11px;
-          color: var(--text3);
-          letter-spacing: .08em;
-          display: flex;
-          align-items: center;
-          gap: 8px;
-        }
-        .strip-dot {
-          width: 4px;
-          height: 4px;
-          border-radius: 50%;
-          background: var(--amber);
-          flex-shrink: 0;
-        }
-        @keyframes marquee { from { transform: translateX(0); } to { transform: translateX(-50%); } }
-
-        section { padding: 5rem 1.5rem; }
-        .container { max-width: 1040px; margin: 0 auto; }
-        .section-label {
-          font-family: var(--font-mono);
-          font-size: 11px;
-          letter-spacing: .12em;
-          color: var(--amber);
-          margin-bottom: .75rem;
-        }
-        .section-title {
-          font-family: var(--font-serif);
-          font-size: clamp(1.8rem, 4vw, 2.8rem);
-          font-weight: 400;
-          line-height: 1.2;
-          margin-bottom: 1rem;
-        }
-        .section-sub {
-          font-size: 15px;
-          color: var(--text2);
-          max-width: 520px;
-          line-height: 1.7;
-        }
-
-        .app-section { background: var(--surface); border-top: 0.5px solid var(--border); border-bottom: 0.5px solid var(--border); }
-        .app-layout { display: grid; grid-template-columns: 1fr 1fr; gap: 3rem; align-items: start; }
-        @media (max-width: 700px) { .app-layout { grid-template-columns: 1fr; } }
-
-        .hatch-row { display: flex; gap: 8px; margin-bottom: 1.25rem; }
-        .hatch-row input {
-          flex: 1;
-          height: 38px;
-          padding: 0 14px;
-          font-size: 14px;
-          font-family: var(--font-mono);
-          border: 0.5px solid var(--border2);
-          border-radius: var(--r);
-          background: var(--surface2);
-          color: var(--text);
-          outline: none;
-          transition: border-color .2s;
-        }
-        .hatch-row input:focus { border-color: var(--amber); }
-        .hatch-row input::placeholder { color: var(--text3); }
-        .hatch-btn {
-          height: 38px;
-          padding: 0 18px;
-          font-size: 13px;
-          font-weight: 500;
-          border: 0.5px solid var(--amber);
-          border-radius: var(--r);
-          background: transparent;
-          color: var(--amber);
-          cursor: pointer;
-          transition: all .2s;
-          white-space: nowrap;
-        }
-        .hatch-btn:hover { background: var(--amber); color: #000; }
-
-        .comp-card {
-          background: var(--bg);
-          border: 0.5px solid var(--border);
-          border-radius: var(--r2);
-          padding: 1.25rem;
-          margin-bottom: 1rem;
-        }
-        .card-top { display: flex; gap: 1.25rem; align-items: flex-start; }
-        .sprite-wrap {
-          position: relative;
-          text-align: center;
-          cursor: pointer;
-          flex-shrink: 0;
-        }
-        .sprite-pre {
-          font-family: var(--font-mono);
-          font-size: 12px;
-          line-height: 1.5;
-          color: var(--text);
-          background: var(--surface2);
-          border-radius: var(--r);
-          padding: 10px 14px;
-          display: inline-block;
-          min-width: 130px;
-          white-space: pre;
-          user-select: none;
-          border: 0.5px solid var(--border);
-          transition: border-color .2s;
-        }
-        .sprite-wrap:hover .sprite-pre { border-color: var(--amber); }
-        .hearts {
-          position: absolute;
-          top: -4px;
-          left: 50%;
-          transform: translateX(-50%);
-          font-size: 13px;
-          color: var(--pink);
-          opacity: 0;
-          transition: opacity .3s, top .5s;
-          pointer-events: none;
-        }
-        .hearts.pop { opacity: 1; top: -22px; }
-        .bubble {
-          font-size: 11.5px;
-          color: var(--text2);
-          font-style: italic;
-          text-align: center;
-          margin-top: 6px;
-          min-height: 28px;
-          max-width: 140px;
-          line-height: 1.4;
-          font-family: var(--font-mono);
-        }
-        .info { flex: 1; min-width: 0; }
-        .name-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 4px; }
-        .cname { font-size: 20px; font-family: var(--font-serif); font-weight: 400; color: var(--text); }
-        .badge {
-          font-size: 10px;
-          padding: 2px 7px;
-          border-radius: 4px;
-          font-weight: 500;
-          font-family: var(--font-mono);
-          letter-spacing: .04em;
-        }
-        .shiny-badge { background: rgba(240, 160, 53, .15); color: var(--amber); border: 0.5px solid rgba(240, 160, 53, .3); }
-        .species-row { font-size: 12px; color: var(--text2); margin-bottom: 10px; font-family: var(--font-mono); }
-        .stats { display: flex; flex-direction: column; gap: 5px; }
-        .stat-r { display: flex; align-items: center; gap: 7px; }
-        .stat-lbl { font-size: 9px; font-weight: 500; color: var(--text3); width: 72px; letter-spacing: .06em; font-family: var(--font-mono); }
-        .bar-bg { flex: 1; height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; }
-        .bar-fg { height: 100%; border-radius: 2px; transition: width .8s ease; }
-        .stat-n { font-size: 10px; color: var(--text2); width: 22px; text-align: right; font-family: var(--font-mono); }
-        .hat-sel { display: flex; gap: 5px; flex-wrap: wrap; margin-top: 10px; }
-        .hat-btn {
-          font-size: 10px;
-          padding: 3px 8px;
-          border: 0.5px solid var(--border2);
-          border-radius: var(--r);
-          background: transparent;
-          color: var(--text3);
-          cursor: pointer;
-          font-family: var(--font-mono);
-          transition: all .15s;
-        }
-        .hat-btn:hover { color: var(--text); border-color: var(--border2); }
-        .hat-btn.active { border-color: var(--amber); color: var(--amber); background: var(--amber-dim); }
-        .card-actions { display: flex; gap: 6px; margin-top: 1rem; flex-wrap: wrap; }
-        .act-btn {
-          flex: 1;
-          min-width: 56px;
-          height: 32px;
-          font-size: 12px;
-          border: 0.5px solid var(--border2);
-          border-radius: var(--r);
-          background: transparent;
-          color: var(--text2);
-          cursor: pointer;
-          font-family: var(--font-body);
-          transition: all .15s;
-        }
-        .act-btn:hover { border-color: var(--border2); color: var(--text); background: var(--surface2); }
-        .act-btn:active { transform: scale(.97); }
-
-        .metrics-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 1rem; }
-        .metric {
-          background: var(--surface2);
-          border-radius: var(--r);
-          padding: 10px;
-          text-align: center;
-          border: 0.5px solid var(--border);
-        }
-        .metric-v { font-size: 14px; font-weight: 500; color: var(--text); font-family: var(--font-mono); }
-        .metric-l { font-size: 9px; color: var(--text3); margin-top: 2px; letter-spacing: .05em; font-family: var(--font-mono); }
-
-        .gallery-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 6px; }
-        @media (max-width: 500px) { .gallery-grid { grid-template-columns: repeat(4, 1fr); } }
-        .g-item {
-          background: var(--surface2);
-          border-radius: var(--r);
-          padding: 7px 5px;
-          text-align: center;
-          cursor: pointer;
-          border: 0.5px solid var(--border);
-          transition: all .15s;
-        }
-        .g-item:hover { border-color: var(--amber); background: var(--amber-dim); }
-        .g-pre {
-          font-family: var(--font-mono);
-          font-size: 6px;
-          line-height: 1.45;
-          color: var(--text2);
-          white-space: pre;
-        }
-        .g-name {
-          font-size: 8.5px;
-          color: var(--text3);
-          margin-top: 3px;
-          overflow: hidden;
-          text-overflow: ellipsis;
-          white-space: nowrap;
-          letter-spacing: .04em;
-        }
-
-        .info-panel { display: flex; flex-direction: column; gap: 1.5rem; padding-top: .5rem; }
-        .info-block-label {
-          font-family: var(--font-mono);
-          font-size: 10px;
-          letter-spacing: .1em;
-          color: var(--text3);
-          margin-bottom: .5rem;
-        }
-        .info-block-title {
-          font-family: var(--font-serif);
-          font-size: 1.4rem;
-          line-height: 1.25;
-          margin-bottom: .5rem;
-          color: var(--text);
-        }
-        .info-block-body { font-size: 13px; color: var(--text2); line-height: 1.7; }
-        .rarity-list { display: flex; flex-direction: column; gap: 6px; margin-top: .75rem; }
-        .rarity-row { display: flex; align-items: center; gap: 10px; }
-        .rarity-star { font-family: var(--font-mono); font-size: 11px; width: 80px; color: var(--amber); }
-        .rarity-bar-bg { flex: 1; height: 4px; background: var(--border); border-radius: 2px; }
-        .rarity-bar-fill { height: 100%; border-radius: 2px; background: var(--amber); }
-        .rarity-pct { font-family: var(--font-mono); font-size: 10px; color: var(--text3); width: 32px; text-align: right; }
-
-        .how-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 2.5rem; }
-        @media (max-width: 640px) { .how-grid { grid-template-columns: 1fr; } }
-        .how-card {
-          background: var(--surface);
-          border: 0.5px solid var(--border);
-          border-radius: var(--r2);
-          padding: 1.5rem;
-          position: relative;
-          overflow: hidden;
-        }
-        .how-card::before {
-          content: attr(data-n);
-          position: absolute;
-          right: 1rem;
-          top: 1rem;
-          font-family: var(--font-mono);
-          font-size: 40px;
-          color: var(--border);
-          font-weight: 700;
-          line-height: 1;
-        }
-        .how-icon { font-family: var(--font-mono); font-size: 24px; margin-bottom: .75rem; display: block; }
-        .how-title { font-size: 15px; font-weight: 500; margin-bottom: .4rem; color: var(--text); }
-        .how-body { font-size: 13px; color: var(--text2); line-height: 1.65; }
-
-        .rarity-table-section { background: var(--surface); border-top: 0.5px solid var(--border); border-bottom: 0.5px solid var(--border); }
-        .rarity-cards { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin-top: 2rem; }
-        @media (max-width: 700px) { .rarity-cards { grid-template-columns: repeat(3, 1fr); } }
-        @media (max-width: 400px) { .rarity-cards { grid-template-columns: repeat(2, 1fr); } }
-        .rar-card { border-radius: var(--r); padding: 1rem; text-align: center; border: 0.5px solid var(--border); }
-        .rar-stars { font-family: var(--font-mono); font-size: 12px; margin-bottom: 6px; }
-        .rar-name { font-size: 12px; font-weight: 500; margin-bottom: 4px; }
-        .rar-chance { font-family: var(--font-mono); font-size: 10px; color: var(--text3); }
-        .rar-0 { background: var(--surface2); }
-        .rar-1 { background: var(--green-dim); border-color: #0f3d20; }
-        .rar-1 .rar-stars { color: var(--green); }
-        .rar-2 { background: #0d1829; border-color: #1a3a5c; }
-        .rar-2 .rar-stars { color: var(--blue); }
-        .rar-3 { background: #160f2e; border-color: #2e1f6e; }
-        .rar-3 .rar-stars { color: var(--purple); }
-        .rar-4 { background: #1e1300; border-color: #4a3000; }
-        .rar-4 .rar-stars { color: var(--amber); }
-
-        .stats-section { padding: 5rem 1.5rem; }
-        .stats-explainer { display: grid; grid-template-columns: 1fr 1fr; gap: 2rem; margin-top: 2rem; }
-        @media (max-width: 640px) { .stats-explainer { grid-template-columns: 1fr; } }
-        .stat-card {
-          background: var(--surface);
-          border: 0.5px solid var(--border);
-          border-radius: var(--r2);
-          padding: 1.25rem;
-        }
-        .stat-card-header { display: flex; align-items: center; gap: 10px; margin-bottom: .5rem; }
-        .stat-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
-        .stat-card-name { font-family: var(--font-mono); font-size: 11px; letter-spacing: .08em; font-weight: 500; }
-        .stat-card-body { font-size: 13px; color: var(--text2); line-height: 1.6; }
-
-        .cta-section {
-          text-align: center;
-          padding: 6rem 1.5rem;
-          position: relative;
-          overflow: hidden;
-        }
-        .cta-glow {
-          position: absolute;
-          width: 500px;
-          height: 300px;
-          border-radius: 50%;
-          background: radial-gradient(circle, rgba(240, 160, 53, .08) 0%, transparent 70%);
-          top: 50%;
-          left: 50%;
-          transform: translate(-50%, -50%);
-          pointer-events: none;
-        }
-        .cta-section .section-title { margin-bottom: .75rem; }
-        .cta-section .section-sub { margin: 0 auto 2rem; text-align: center; }
-        .cta-term {
-          font-family: var(--font-mono);
-          font-size: 13px;
-          color: var(--text3);
-          margin-top: 2rem;
-          border-top: 0.5px solid var(--border);
-          padding-top: 2rem;
-        }
-        .cta-term span { color: var(--amber); }
-
-        footer {
-          border-top: 0.5px solid var(--border);
-          padding: 1.5rem 2rem;
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          font-size: 12px;
-          color: var(--text3);
-          font-family: var(--font-mono);
-        }
-        footer a { color: var(--text3); transition: color .15s; }
-        footer a:hover { color: var(--amber); }
-
-        @keyframes fadeUp { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
-        .fade-up { animation: fadeUp .6s ease both; }
-        .delay-1 { animation-delay: .1s; }
-        .delay-2 { animation-delay: .2s; }
-        .delay-3 { animation-delay: .3s; }
-        .delay-4 { animation-delay: .4s; }
-        @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
-        .cursor { animation: blink 1.1s step-end infinite; color: var(--amber); }
-
-        ::-webkit-scrollbar { width: 6px; }
-        ::-webkit-scrollbar-track { background: var(--bg); }
-        ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
-        ::-webkit-scrollbar-thumb:hover { background: var(--text3); }
-      `}</style>
-
       <nav>
-        <div className="nav-logo">RoastPet<span className="cursor">_</span></div>
+        <div className="nav-logo">DevCompanion_</div>
         <div className="nav-links">
           <a href="#app">Hatch</a>
           <a href="#how">How it works</a>
           <a href="#rarities">Rarities</a>
         </div>
-        <a href="#app" className="nav-cta">Get yours</a>
+        <a href="#app" className="nav-cta">Get yours →</a>
       </nav>
 
       <section className="hero">
         <div className="hero-grid"></div>
         <div className="hero-glow"></div>
-        <div className="hero-eyebrow fade-up">April 2026 &mdash; Now hatching</div>
-        <h1 className="fade-up delay-1">Your sarcastic<br/><em>coding roaster</em></h1>
-        <p className="hero-sub fade-up delay-2">Enter your username. Get a unique AI companion that watches your code, roasts your mistakes, fixes your bugs, and levels up as you improve. No rerolls. No mercy.</p>
-        <div className="hero-actions fade-up delay-3">
-          <a href="#app"><button className="btn-primary">Hatch your RoastPet</button></a>
-          <a href="#how"><button className="btn-ghost">How it works</button></a>
+        <div className="eyebrow">April 2026 — Now hatching</div>
+        <h1>Your deterministic<br /><em>coding buddy</em></h1>
+        <p className="hero-sub">Website se token milega. Terminal me run karoge to wahi exact pet open hoga aur saare real companion kaam waha karega.</p>
+        <div className="hero-actions">
+          <a href="#app"><button className="btn btn-primary">Hatch your companion ↗</button></a>
+          <a href="#how"><button className="btn btn-ghost">How it works</button></a>
         </div>
-        <div className="hero-sprites fade-up delay-4">
-          {/* Hero sprites */}
-          <div className="hero-sprite-card"><pre>{renderSprite({ species: 'duck', eye: '·', hat: 'none' }, 0)}</pre></div>
-          <div className="hero-sprite-card"><pre>{renderSprite({ species: 'dragon', eye: '·', hat: 'none' }, 0)}</pre></div>
-          <div className="hero-sprite-card"><pre>{renderSprite({ species: 'axolotl', eye: '·', hat: 'none' }, 0)}</pre></div>
-          <div className="hero-sprite-card"><pre>{renderSprite({ species: 'ghost', eye: '·', hat: 'none' }, 0)}</pre></div>
-          <div className="hero-sprite-card"><pre>{renderSprite({ species: 'mushroom', eye: '·', hat: 'none' }, 0)}</pre></div>
+        <div className="hero-sprites">
+          {["duck", "dragon", "axolotl", "ghost", "mushroom"].map((sp) => (
+            <div key={sp} className="hero-sprite-card"><pre>{renderSprite({ species: sp, eye: "·", hat: "none" }, frame)}</pre></div>
+          ))}
         </div>
       </section>
 
       <div className="strip">
         <div className="strip-inner">
-          <span className="strip-item"><span className="strip-dot"></span>18 SPECIES</span>
-          <span className="strip-item"><span className="strip-dot"></span>DETERMINISTIC SEED</span>
-          <span className="strip-item"><span className="strip-dot"></span>5 RPG STATS</span>
-          <span className="strip-item"><span className="strip-dot"></span>AI CODE ROASTING</span>
-          <span className="strip-item"><span className="strip-dot"></span>1% LEGENDARY</span>
-          <span className="strip-item"><span className="strip-dot"></span>MEME SOUNDS</span>
-          <span className="strip-item"><span className="strip-dot"></span>XP LEVELING</span>
-          <span className="strip-item"><span className="strip-dot"></span>7 HAT STYLES</span>
-          <span className="strip-item"><span className="strip-dot"></span>AUTO CODE FIX</span>
-          <span className="strip-item"><span className="strip-dot"></span>YOUR USERNAME = YOUR FATE</span>
+          {[..."18 SPECIES|DETERMINISTIC SEED|TOKEN TO TERMINAL FLOW|AI VOICE PET|MEME REACTIONS|REAL COMPANION LOOP|YOUR USERNAME = YOUR FATE|GITHUB POWERED STARTERS|18 SPECIES|DETERMINISTIC SEED|TOKEN TO TERMINAL FLOW|AI VOICE PET|MEME REACTIONS|REAL COMPANION LOOP|YOUR USERNAME = YOUR FATE|GITHUB POWERED STARTERS".split("|")].map((item, index) => (
+            <span className="strip-item" key={`${item}-${index}`}><span className="strip-dot"></span>{item}</span>
+          ))}
         </div>
       </div>
 
@@ -628,90 +342,148 @@ export default function Dashboard() {
         <div className="container">
           <div className="app-layout">
             <div>
-              <div className="section-label">// hatch yours</div>
-              <h2 className="section-title" style={{ marginBottom: '1.5rem' }}>Enter your username</h2>
+              <div className="section-label">Hatch Yours</div>
+              <h2 className="section-title">Enter your username</h2>
               <div className="hatch-row">
-                <input id="uInput" placeholder="github username or any seed..." defaultValue="devuser42" />
-                <button className="hatch-btn" onClick={handleGenerate}>Hatch</button>
+                <input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="github username or any seed..." onKeyDown={(e) => e.key === "Enter" && hatch()} />
+                <button className="hatch-btn" onClick={hatch} disabled={loading}>{loading ? "Hatching..." : "Hatch ↗"}</button>
               </div>
+              <div className="hatch-row">
+                <input value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="AI API key for roast + voice" />
+                <select value={roastLevel} onChange={(e) => setRoastLevel(e.target.value)}>
+                  <option value="gentle">gentle</option>
+                  <option value="sarcastic">sarcastic</option>
+                  <option value="chaotic">chaotic</option>
+                  <option value="boss-battle">boss-battle</option>
+                </select>
+              </div>
+
               <div className="comp-card">
                 <div className="card-top">
                   <div className="sprite-wrap">
-                    <pre className="sprite-pre">{spritePreview}</pre>
-                    <div className="hearts">♥ ♥</div>
-                    <div className="bubble">Waiting for your next commit...</div>
+                    <pre className="sprite-pre">{sprite}</pre>
+                    <div className="bubble">{bubble}</div>
                   </div>
                   <div className="info">
                     <div className="name-row">
-                      <span className="cname">Your Pet</span>
-                      <span className="badge">★ Common</span>
+                      <span className="card-name">{preview.name}</span>
+                      <span className="badge" style={{ background: "rgba(255,255,255,0.05)", color: "#e8e4d8" }}>{`${"★".repeat(preview.rarity + 1)} ${RARITIES[preview.rarity]}`}</span>
+                      {preview.shiny ? <span className="badge" style={{ background: "rgba(240,160,53,.15)", color: "#f0a035" }}>✦ Shiny</span> : null}
                     </div>
-                    <div className="species-row">{species.charAt(0).toUpperCase() + species.slice(1)} · eye: "{eye}"</div>
+                    <div className="species-row">{preview.species} · eye: &quot;{preview.eye}&quot;</div>
                     <div className="stats">
-                      {/* Placeholder stats */}
-                      <div className="stat-r"><span className="stat-lbl">DEBUGGING</span><div className="bar-bg"><div className="bar-fg" style={{ width: '50%', background: '#378add' }}></div></div><span className="stat-n">50</span></div>
-                      <div className="stat-r"><span className="stat-lbl">PATIENCE</span><div className="bar-bg"><div className="bar-fg" style={{ width: '60%', background: '#1d9e75' }}></div></div><span className="stat-n">60</span></div>
-                      <div className="stat-r"><span className="stat-lbl">CHAOS</span><div className="bar-bg"><div className="bar-fg" style={{ width: '40%', background: '#d85a30' }}></div></div><span className="stat-n">40</span></div>
-                      <div className="stat-r"><span className="stat-lbl">WISDOM</span><div className="bar-bg"><div className="bar-fg" style={{ width: '70%', background: '#7f77dd' }}></div></div><span className="stat-n">70</span></div>
-                      <div className="stat-r"><span className="stat-lbl">SNARK</span><div className="bar-bg"><div className="bar-fg" style={{ width: '80%', background: '#d4537e' }}></div></div><span className="stat-n">80</span></div>
+                      {preview.stats.map((value, index) => (
+                        <div className="stat-r" key={STAT_NAMES[index]}>
+                          <span className="stat-lbl">{STAT_NAMES[index]}</span>
+                          <div className="bar-bg"><div className="bar-fg" style={{ width: `${value}%`, background: STAT_COLORS[index] }}></div></div>
+                          <span className="stat-n">{value}</span>
+                        </div>
+                      ))}
                     </div>
                     <div className="hat-sel">
-                      {Object.keys(HATS).map((h) => (
-                        <button key={h} className={`hat-btn ${hat === h ? 'active' : ''}`} onClick={() => setHat(h)}>{h}</button>
+                      {Object.keys(HATS).map((hatKey) => (
+                        <button key={hatKey} className={`hat-btn ${preview.hat === hatKey ? "active" : ""}`} onClick={() => setPreview((prev) => ({ ...prev, hat: hatKey }))}>{hatKey}</button>
                       ))}
                     </div>
                   </div>
                 </div>
                 <div className="card-actions">
-                  <button className="act-btn">Pet</button>
-                  <button className="act-btn">Ask</button>
-                  <button className="act-btn">Animate</button>
-                  <button className="act-btn">Random</button>
+                  <button className="act-btn" onClick={() => setBubble(QUIPS[Math.floor(Math.random() * QUIPS.length)] || QUIPS[0])}>Pet ♥</button>
+                  <button className="act-btn" onClick={() => { setBubble(ASK_LINES[askIndex % ASK_LINES.length] || ASK_LINES[0]); setAskIndex((prev) => prev + 1); }}>Ask</button>
+                  <button className="act-btn" onClick={() => setAnim((prev) => !prev)}>{anim ? "Stop ◼" : "Animate"}</button>
+                  <button className="act-btn" onClick={() => setUsername(Math.random().toString(36).slice(2, 10))}>Random</button>
                 </div>
               </div>
-              <div className="metrics-row">
-                <div className="metric"><div className="metric-v">{species.slice(0, 6)}</div><div className="metric-l">SPECIES</div></div>
-                <div className="metric"><div className="metric-v">Common</div><div className="metric-l">RARITY</div></div>
-                <div className="metric"><div className="metric-v">SNARK</div><div className="metric-l">TOP STAT</div></div>
-                <div className="metric"><div className="metric-v">3</div><div className="metric-l">FRAMES</div></div>
+
+              {error ? <div className="error">{error}</div> : null}
+              {result ? (
+                <div className="result">
+                  <div className="mono" style={{ color: "var(--amber)", marginBottom: ".5rem" }}>TOKEN HATCHED</div>
+                  <div>{result.existingPet ? "Existing allotted pet restored." : "Fresh pet allotted."}</div>
+                  <div>{result.starter.starterTitle} · {result.starter.githubLevel}</div>
+                  <div style={{ marginTop: ".45rem" }}>{result.starter.starterFlavor}</div>
+                  <div style={{ marginTop: ".45rem" }}>Token: <strong>{result.token}</strong></div>
+                  <div style={{ marginTop: ".45rem" }}>GitHub aura score: <strong>{result.starter.score}</strong></div>
+                  <div className="command">{result.command}</div>
+                  {result.desktopCommand ? <div className="command" style={{ marginTop: ".5rem" }}>{result.desktopCommand}</div> : null}
+                </div>
+              ) : null}
+
+              <div className="result">
+                <div className="mono" style={{ color: "var(--amber)", marginBottom: ".5rem" }}>PET STATUS</div>
+                <div>{presence?.online ? "Pet is online on your screen." : "Pet is offline or not connected yet."}</div>
+                <div style={{ marginTop: ".4rem" }}>Surface: {presence?.surface || "unknown"}</div>
+                <div style={{ marginTop: ".2rem" }}>Last note: {presence?.status || "No heartbeat yet."}</div>
               </div>
-              <div className="section-label" style={{ marginBottom: '8px' }}>// all 18 species - click to adopt</div>
+
+              <div className="result">
+                <div className="mono" style={{ color: "var(--amber)", marginBottom: ".5rem" }}>REMOTE COMPANION COMMANDS</div>
+                <div>Browser se bolo ya type karo. Pet token ke through project me kaam karega.</div>
+                <div className="hatch-row" style={{ marginTop: ".8rem" }}>
+                  <input value={commandToken} onChange={(e) => setCommandToken(e.target.value)} placeholder="pet token" />
+                </div>
+                <div className="hatch-row">
+                  <input value={remoteCommand} onChange={(e) => setRemoteCommand(e.target.value)} placeholder="create a new file called notes/todo.md" onKeyDown={(e) => e.key === "Enter" && sendRemoteCommand(remoteCommand)} />
+                  <button className="hatch-btn" onClick={() => sendRemoteCommand(remoteCommand)}>Send</button>
+                </div>
+                <div className="hatch-row">
+                  <button className="hatch-btn" onClick={startVoiceCommand}>{listening ? "Listening..." : "Speak Command"}</button>
+                </div>
+                {pendingVoiceCommand ? (
+                  <div className="command">
+                    <div><strong>Voice confirmation required</strong></div>
+                    <div style={{ marginTop: ".35rem" }}>Raw: {rawTranscript}</div>
+                    <div style={{ marginTop: ".35rem" }}>Cleaned: {pendingVoiceCommand}</div>
+                    <div className="hatch-row" style={{ marginTop: ".8rem", marginBottom: 0 }}>
+                      <button className="hatch-btn" onClick={() => { void sendRemoteCommand(pendingVoiceCommand); setPendingVoiceCommand(""); setRawTranscript(""); }}>Confirm And Send</button>
+                      <button className="hatch-btn" onClick={() => { setPendingVoiceCommand(""); setRawTranscript(""); setRemoteStatus("Voice command discarded."); }}>Discard</button>
+                    </div>
+                  </div>
+                ) : null}
+                <div style={{ marginTop: ".45rem" }}>
+                  Examples: `notes me ek todo file banao`, `promo.html naam ka landing page banao`, `is project ko analyze karo aur batao kya improve karna hai`
+                </div>
+                {remoteStatus ? <div className="command">{remoteStatus}</div> : null}
+                {commandHistory.length ? (
+                  <div className="command">
+                    {commandHistory.map((entry) => (
+                      <div key={entry.id} style={{ marginBottom: ".7rem", paddingBottom: ".7rem", borderBottom: "1px solid var(--border)" }}>
+                        <div><strong>{entry.status.toUpperCase()}</strong></div>
+                        <div>{entry.text}</div>
+                        <div style={{ color: "var(--text3)", marginTop: ".2rem" }}>{entry.statusMessage}</div>
+                        {["queued", "picked", "working"].includes(entry.status) ? (
+                          <div style={{ marginTop: ".45rem" }}>
+                            <button className="hatch-btn" onClick={() => cancelRemoteCommand(entry.id)}>Cancel</button>
+                          </div>
+                        ) : null}
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+
+              <div className="metrics-row">
+                <div className="metric"><div className="metric-v">{preview.species.slice(0, 6)}</div><div className="metric-l">SPECIES</div></div>
+                <div className="metric"><div className="metric-v">{RARITIES[preview.rarity].slice(0, 6)}</div><div className="metric-l">RARITY</div></div>
+                <div className="metric"><div className="metric-v">{STAT_NAMES[preview.topStatIdx].slice(0, 5)}</div><div className="metric-l">TOP STAT</div></div>
+                <div className="metric"><div className="metric-v">{BODIES[preview.species]?.length || 0}</div><div className="metric-l">FRAMES</div></div>
+              </div>
+
+              <div className="section-label">All 18 Species — Click To Adopt</div>
               <div className="gallery-grid">
                 {SPECIES.map((sp) => (
-                  <div key={sp} className="g-item" onClick={() => setSpecies(sp)}>
-                    <pre className="g-pre">{renderSprite({ species: sp, eye: 'o', hat: 'none' }, 0)}</pre>
+                  <div key={sp} className="g-item" onClick={() => setUsername(`${sp}_fan`)}>
+                    <pre className="g-pre">{renderSprite({ species: sp, eye: "o", hat: "none" }, 0)}</pre>
                     <div className="g-name">{sp}</div>
                   </div>
                 ))}
               </div>
             </div>
+
             <div className="info-panel">
-              <div className="info-block">
-                <div className="info-block-label">// determinism</div>
-                <div className="info-block-title">Same seed, same roaster. Always.</div>
-                <div className="info-block-body">Your RoastPet is generated from a hash of your username. It's permanent, unfakeable, and always yours. Same name in 10 years = same duck roasting your code.</div>
-              </div>
-              <div className="info-block">
-                <div className="info-block-label">// rarity drop rates</div>
-                <div className="info-block-title">Real scarcity. No gacha.</div>
-                <div className="rarity-list">
-                  <div className="rarity-row"><span className="rarity-star">★</span><div className="rarity-bar-bg"><div className="rarity-bar-fill" style={{ width: '60%' }}></div></div><span className="rarity-pct">60%</span><span style={{ fontSize: '11px', color: 'var(--text3)', marginLeft: '4px' }}>Common</span></div>
-                  <div className="rarity-row"><span className="rarity-star">★★</span><div className="rarity-bar-bg"><div className="rarity-bar-fill" style={{ width: '25%' }}></div></div><span className="rarity-pct">25%</span><span style={{ fontSize: '11px', color: 'var(--text3)', marginLeft: '4px' }}>Uncommon</span></div>
-                  <div className="rarity-row"><span className="rarity-star">★★★</span><div className="rarity-bar-bg"><div className="rarity-bar-fill" style={{ width: '10%' }}></div></div><span className="rarity-pct">10%</span><span style={{ fontSize: '11px', color: 'var(--text3)', marginLeft: '4px' }}>Rare</span></div>
-                  <div className="rarity-row"><span className="rarity-star">★★★★</span><div className="rarity-bar-bg"><div className="rarity-bar-fill" style={{ width: '4%' }}></div></div><span className="rarity-pct">4%</span><span style={{ fontSize: '11px', color: 'var(--text3)', marginLeft: '4px' }}>Epic</span></div>
-                  <div className="rarity-row"><span className="rarity-star">★★★★★</span><div className="rarity-bar-bg"><div className="rarity-bar-fill" style={{ width: '1%' }}></div></div><span className="rarity-pct">1%</span><span style={{ fontSize: '11px', color: 'var(--text3)', marginLeft: '4px' }}>Legendary</span></div>
-                </div>
-              </div>
-              <div className="info-block">
-                <div className="info-block-label">// xp & leveling</div>
-                <div className="info-block-title">Write good code. Level up.</div>
-                <div className="info-block-body">Every time you save a file, your RoastPet analyzes it via AI. Good code earns XP (+50 to +100). Bad code loses XP (-30). Level up your pet by actually improving as a developer.</div>
-              </div>
-              <div className="info-block">
-                <div className="info-block-label">// personality</div>
-                <div className="info-block-title">They have <em>opinions.</em></div>
-                <div className="info-block-body">Your pet roasts your code, plays meme sounds through your speakers, and offers to auto-fix your mistakes. Write <code># @roastpet</code> in any file to summon it directly.</div>
-              </div>
+              <div className="info-box"><div className="info-label">Determinism</div><div className="info-title">Same seed, same companion. Always.</div><div className="info-body">Tumhara preview deterministic hai. Real pet backend pe token ke saath save hota hai, aur terminal wahi exact pet open karta hai.</div></div>
+              <div className="info-box"><div className="info-label">Token Flow</div><div className="info-title">Website hatches. Terminal lives.</div><div className="info-body">Ye page hatch lab hai. Yaha token milega. Terminal me command run karte hi wahi pet roast, meme reaction aur AI voice behavior ke saath khul jayega.</div></div>
+              <div className="info-box"><div className="info-label">Personality</div><div className="info-title">They have opinions.</div><div className="info-body">Ask preview sirf mood dikhata hai. Real companion loop terminal me chalega, jaha pet code dekhega aur react karega.</div></div>
             </div>
           </div>
         </div>
@@ -719,79 +491,60 @@ export default function Dashboard() {
 
       <section id="how">
         <div className="container">
-          <div className="section-label">// how it works</div>
-          <h2 className="section-title">Built on hash, roast, and shame</h2>
-          <p className="section-sub">Three steps. Your pet watches, judges, and fixes your code.</p>
+          <div className="section-label">How It Works</div>
+          <h2 className="section-title">Built on token, pet config, and terminal flow</h2>
+          <p className="section-sub">Website creates the token. Terminal opens the exact same companion.</p>
           <div className="how-grid">
-            <div className="how-card" data-n="01">
-              <span className="how-icon">#</span>
-              <div className="how-title">Hatch on the web</div>
-              <div className="how-body">Enter your username, customize your pet's species and hat. The dashboard generates a unique token and a CLI command you paste into your terminal.</div>
-            </div>
-            <div className="how-card" data-n="02">
-              <span className="how-icon">&gt;_</span>
-              <div className="how-title">Run the CLI daemon</div>
-              <div className="how-body">The Python CLI watches your codebase in real-time using watchdog. Every file save triggers an AI analysis through your secure backend. No API keys exposed locally.</div>
-            </div>
-            <div className="how-card" data-n="03">
-              <span className="how-icon">!!!</span>
-              <div className="how-title">Get roasted. Get fixed.</div>
-              <div className="how-body">Your pet roasts your code, plays meme sounds (bruh, womp, emotional damage), and offers the corrected version. Press Y to auto-apply the fix. Earn or lose XP.</div>
-            </div>
+            <div className="how-card"><div className="mono" style={{ marginBottom: ".5rem" }}>01</div><div>Hatch on web with username + API key.</div></div>
+            <div className="how-card"><div className="mono" style={{ marginBottom: ".5rem" }}>02</div><div>Get token and CLI command from this page.</div></div>
+            <div className="how-card"><div className="mono" style={{ marginBottom: ".5rem" }}>03</div><div>Run token in terminal and let the real pet do the work there.</div></div>
           </div>
         </div>
       </section>
 
       <section className="rarity-table-section" id="rarities">
         <div className="container">
-          <div className="section-label">// rarities</div>
+          <div className="section-label">Rarities</div>
           <h2 className="section-title">Five tiers. One legendary.</h2>
-          <p className="section-sub">Rarity is determined by your hash. Not by paying, not by grinding.</p>
+          <p className="section-sub">Design vibe same rakhi hai, but now it feeds a real token-to-terminal companion flow.</p>
           <div className="rarity-cards">
-            <div className="rar-card rar-0"><div className="rar-stars">★</div><div className="rar-name" style={{ color: 'var(--text2)' }}>Common</div><div className="rar-chance">60% chance</div><div style={{ fontSize: '11px', color: 'var(--text3)', marginTop: '8px', lineHeight: '1.5' }}>No hat. Honest work.</div></div>
-            <div className="rar-card rar-1"><div className="rar-stars">★★</div><div className="rar-name" style={{ color: 'var(--green)' }}>Uncommon</div><div className="rar-chance">25% chance</div><div style={{ fontSize: '11px', color: 'var(--text3)', marginTop: '8px', lineHeight: '1.5' }}>Hat unlocked. Higher stats.</div></div>
-            <div className="rar-card rar-2"><div className="rar-stars">★★★</div><div className="rar-name" style={{ color: 'var(--blue)' }}>Rare</div><div className="rar-chance">10% chance</div><div style={{ fontSize: '11px', color: 'var(--text3)', marginTop: '8px', lineHeight: '1.5' }}>Great stats. Worth flexing.</div></div>
-            <div className="rar-card rar-3"><div className="rar-stars">★★★★</div><div className="rar-name" style={{ color: 'var(--purple)' }}>Epic</div><div className="rar-chance">4% chance</div><div style={{ fontSize: '11px', color: 'var(--text3)', marginTop: '8px', lineHeight: '1.5' }}>Exceptional. Post it.</div></div>
-            <div className="rar-card rar-4"><div className="rar-stars">★★★★★</div><div className="rar-name" style={{ color: 'var(--amber)' }}>Legendary</div><div className="rar-chance">1% chance</div><div style={{ fontSize: '11px', color: 'var(--text3)', marginTop: '8px', lineHeight: '1.5' }}>You didn't earn it. But you have it.</div></div>
+            {RARITIES.map((rarity, index) => (
+              <div key={rarity} className={`rar-card rar-${index}`}>
+                <div className="mono" style={{ marginBottom: ".5rem" }}>{"★".repeat(index + 1)}</div>
+                <div>{rarity}</div>
+              </div>
+            ))}
           </div>
         </div>
       </section>
 
       <section className="stats-section">
         <div className="container">
-          <div className="section-label">// the five stats</div>
+          <div className="section-label">The Five Stats</div>
           <h2 className="section-title">What kind of dev are you?</h2>
-          <p className="section-sub">Each pet has one peak, one dump, and three scattered stats.</p>
           <div className="stats-explainer">
-            <div className="stat-card"><div className="stat-card-header"><div className="stat-dot" style={{ background: '#378add' }}></div><span className="stat-card-name" style={{ color: '#378add' }}>DEBUGGING</span></div><div className="stat-card-body">High DEBUGGING means you read V8 source for fun. Low means console.log until it stops yelling.</div></div>
-            <div className="stat-card"><div className="stat-card-header"><div className="stat-dot" style={{ background: '#1d9e75' }}></div><span className="stat-card-name" style={{ color: '#1d9e75' }}>PATIENCE</span></div><div className="stat-card-body">Your relationship with 2-hour CI pipelines and stakeholders who want "just a small change."</div></div>
-            <div className="stat-card"><div className="stat-card-header"><div className="stat-dot" style={{ background: '#d85a30' }}></div><span className="stat-card-name" style={{ color: '#d85a30' }}>CHAOS</span></div><div className="stat-card-body">Push to main. YOLO deploys on Fridays. 400-line functions. High CHAOS makes things happen.</div></div>
-            <div className="stat-card"><div className="stat-card-header"><div className="stat-dot" style={{ background: '#7f77dd' }}></div><span className="stat-card-name" style={{ color: '#7f77dd' }}>WISDOM</span></div><div className="stat-card-body">The one who's seen it fail before. Knows which tech debt is load-bearing.</div></div>
-            <div className="stat-card" style={{ gridColumn: '1/-1', maxWidth: '320px' }}><div className="stat-card-header"><div className="stat-dot" style={{ background: '#d4537e' }}></div><span className="stat-card-name" style={{ color: '#d4537e' }}>SNARK</span></div><div className="stat-card-body">Code review tone. Whether your pet says "interesting approach" or "this will not scale."</div></div>
+            {STAT_NAMES.map((stat, index) => (
+              <div key={stat} className="stat-card">
+                <div className="mono" style={{ color: STAT_COLORS[index], marginBottom: ".5rem" }}>{stat}</div>
+                <div style={{ color: "var(--text2)" }}>Your companion uses this stat profile as part of its vibe and identity.</div>
+              </div>
+            ))}
           </div>
         </div>
       </section>
 
-      <section className="cta-section">
-        <div className="cta-glow"></div>
+      <section className="cta">
         <div className="container">
-          <div className="section-label">// claim yours</div>
-          <h2 className="section-title">Your RoastPet is already waiting.</h2>
-          <p className="section-sub">It's been a deterministic function of your username this whole time.</p>
-          <div style={{ display: 'flex', gap: '12px', justifyContent: 'center', flexWrap: 'wrap' }}>
-            <a href="#app"><button className="btn-primary">Hatch your RoastPet</button></a>
-          </div>
-          <div className="cta-term"><span>// run locally:</span> cd roastpet_cli && python cli.py --token YOUR_TOKEN</div>
+          <div className="section-label">Claim Yours</div>
+          <h2 className="section-title">Your companion is already waiting.</h2>
+          <p className="section-sub">This page hatches the token. The terminal opens the real pet. That is where the whole platform comes alive.</p>
+          <div className="cta-term"><span style={{ color: "var(--amber)" }}>token flow:</span> website → token → terminal pet → code roasting + AI voice + meme reactions</div>
         </div>
       </section>
 
       <footer>
-        <div>RoastPet AI &mdash; built for developers who can take a joke</div>
-        <div style={{ display: 'flex', gap: '1.5rem' }}>
-          <a href="#app">hatch</a>
-          <a href="#how">docs</a>
-          <a href="https://github.com">github</a>
-        </div>
+        <div>DevCompanion — built for developers who want a real terminal pet</div>
+        <div style={{ display: "flex", gap: "1.5rem" }}><a href="#app">hatch</a><a href="#how">docs</a><a href="https://github.com">github</a></div>
       </footer>
     </>
   );

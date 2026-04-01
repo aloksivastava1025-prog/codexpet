@@ -2,11 +2,13 @@
 import argparse
 import sys
 import os
-import threading
 from watchdog.observers import Observer
 from watcher import FileChangeHandler
 from pet_ui import PetRenderer
 from rpg_engine import load_or_hatch_soul
+from companion_memory import touch_session
+from instance_guard import claim_single_instance, release_instance
+from pet_voice import get_intro_line
 from dotenv import load_dotenv
 from rich.console import Console
 from rich.panel import Panel
@@ -83,6 +85,8 @@ def main():
     parser = argparse.ArgumentParser(description="RoastPet CLI: Your connected AI coding buddy with RPG leveling.")
     parser.add_argument("--token", type=str, help="Your unique sync token from the web dashboard", required=True)
     parser.add_argument("--dir", type=str, default=".", help="Directory to watch for code changes")
+    parser.add_argument("--backend-url", type=str, default="http://localhost:3000", help="Backend URL for RoastPet APIs")
+    parser.add_argument("--plain", action="store_true", help="Use plain terminal mode instead of Rich live UI")
 
     args = parser.parse_args()
 
@@ -91,8 +95,11 @@ def main():
     console.print("[dim]Watching: {d}[/dim]".format(d=os.path.abspath(args.dir)))
     console.print()
 
+    lock_path = claim_single_instance("cli", args.token)
+
     # Load or hatch the persistent soul
-    soul = load_or_hatch_soul(args.token)
+    soul = load_or_hatch_soul(args.token, backend_url=args.backend_url)
+    touch_session(args.token, soul["species"])
 
     # Check if this is first hatch (level 1, xp 0)
     if soul.get("level", 1) == 1 and soul.get("xp", 0) == 0:
@@ -105,6 +112,9 @@ def main():
         xp = soul["xp"]
         console.print("[{s}]Welcome back, {sp}! (Lv.{lv}, {xp}/100 XP)[/{s}]".format(s=style, sp=sp, lv=lv, xp=xp))
         console.print()
+    console.print("[bold magenta]{msg}[/bold magenta]".format(msg=get_intro_line(soul["species"])))
+    console.print("[dim]Trainer rank: {rank}[/dim]".format(rank=soul.get("trainer_rank", "Rookie Trainer")))
+    console.print()
 
     # Create the renderer with the soul data
     ui = PetRenderer(
@@ -112,6 +122,8 @@ def main():
         hat=soul["hat"],
         eye=soul["eye"],
         soul=soul,
+        token=args.token,
+        backend_url=args.backend_url,
     )
     ui.start_idle_animation()
 
@@ -121,16 +133,23 @@ def main():
     observer.schedule(event_handler, path=os.path.abspath(args.dir), recursive=True)
     observer.start()
 
-    console.print("[dim]RoastPet is now watching your code. Save a file to get roasted! Press Ctrl+C to quit.[/dim]")
+    console.print("[dim]RoastPet is now watching your code, talking to you, and trying very hard to keep boredom away. Save a file to get roasted! Press Ctrl+C to quit.[/dim]")
     console.print()
 
+    use_plain = args.plain or (not sys.stdout.isatty())
+
     try:
-        ui.render_loop()
+        if use_plain:
+            ui.render_plain_loop()
+        else:
+            ui.render_loop()
     except KeyboardInterrupt:
         console.print()
         console.print("[bold red]RoastPet has been put to sleep. See you next time![/bold red]")
         observer.stop()
         ui.stop()
+    finally:
+        release_instance(lock_path)
     observer.join()
 
 

@@ -2,6 +2,94 @@ import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import OpenAI from 'openai';
 
+const RATE_LIMIT_WINDOW_MS = 60_000;
+const RATE_LIMIT_MAX_REQUESTS = 8;
+const rateLimitStore = new Map<string, number[]>();
+
+function getClientIp(request: Request) {
+  const forwardedFor = request.headers.get('x-forwarded-for');
+  if (forwardedFor) {
+    return forwardedFor.split(',')[0].trim();
+  }
+
+  const realIp = request.headers.get('x-real-ip');
+  if (realIp) {
+    return realIp.trim();
+  }
+
+  return 'local';
+}
+
+function enforceRateLimit(key: string) {
+  const now = Date.now();
+  const windowStart = now - RATE_LIMIT_WINDOW_MS;
+  const recentRequests = (rateLimitStore.get(key) || []).filter((ts) => ts > windowStart);
+
+  if (recentRequests.length >= RATE_LIMIT_MAX_REQUESTS) {
+    const retryAfterMs = RATE_LIMIT_WINDOW_MS - (now - recentRequests[0]);
+    return {
+      limited: true,
+      retryAfterSeconds: Math.max(1, Math.ceil(retryAfterMs / 1000)),
+    };
+  }
+
+  recentRequests.push(now);
+  rateLimitStore.set(key, recentRequests);
+
+  if (rateLimitStore.size > 2000) {
+    for (const [storeKey, timestamps] of rateLimitStore.entries()) {
+      const filtered = timestamps.filter((ts) => ts > windowStart);
+      if (filtered.length === 0) {
+        rateLimitStore.delete(storeKey);
+      } else {
+        rateLimitStore.set(storeKey, filtered);
+      }
+    }
+  }
+
+  return { limited: false, retryAfterSeconds: 0 };
+}
+
+function buildOpenAIClient(apiKey: string) {
+  if (apiKey.startsWith('nvapi-')) {
+    return {
+      client: new OpenAI({
+        apiKey,
+        baseURL: 'https://integrate.api.nvidia.com/v1',
+      }),
+      model: process.env.NVIDIA_MODEL || 'meta/llama-3.1-70b-instruct',
+      supportsStructuredOutput: false,
+      provider: 'nvidia',
+    };
+  }
+
+  return {
+    client: new OpenAI({ apiKey }),
+    model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
+    supportsStructuredOutput: true,
+    provider: 'openai',
+  };
+}
+
+function parseModelJson(content: string | null) {
+  if (!content) {
+    throw new Error('Model returned an empty response.');
+  }
+
+  try {
+    return JSON.parse(content);
+  } catch {
+    const start = content.indexOf('{');
+    const end = content.lastIndexOf('}');
+
+    if (start >= 0 && end > start) {
+      return JSON.parse(content.slice(start, end + 1));
+    }
+
+    throw new Error('Model response was not valid JSON.');
+  }
+}
+
 export async function POST(request: Request) {
   try {
     const { token, code } = await request.json();
@@ -10,23 +98,38 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'Missing token or code' }, { status: 400 });
     }
 
+    const clientIp = getClientIp(request);
+    const rateLimit = enforceRateLimit(`${clientIp}:${token}`);
+    if (rateLimit.limited) {
+      return NextResponse.json(
+        {
+          error: 'Too many roast requests. Give your pet a second to breathe.',
+          retryAfterSeconds: rateLimit.retryAfterSeconds,
+        },
+        {
+          status: 429,
+          headers: {
+            'Retry-After': String(rateLimit.retryAfterSeconds),
+          },
+        }
+      );
+    }
+
     const config = await prisma.petConfig.findUnique({
-      where: { token }
+      where: { token },
     });
 
     if (!config) {
       return NextResponse.json({ error: 'Invalid token. Unrecognized pet.' }, { status: 404 });
     }
 
-    // Use user's stored API Key or a fallback server API key
-    const openApiKey = config.apiKey || process.env.OPENAI_API_KEY;
+    const apiKey = config.apiKey || process.env.OPENAI_API_KEY;
 
-    if (!openApiKey) {
+    if (!apiKey) {
       return NextResponse.json({ error: 'No API Key present for this pet.' }, { status: 400 });
     }
 
-    const openai = new OpenAI({ apiKey: openApiKey });
-
+    const { client, model, supportsStructuredOutput, provider } = buildOpenAIClient(apiKey);
     const systemPrompt = `You are a highly sarcastic, slightly aggressive, yet deeply helpful AI programming mascot (${config.species} with ${config.hat} hat and ${config.eye} eyes).
 The user requested roast level: ${config.roastLevel}.
 Read the user's code, find any flaws, bad practices, bugs, or questionable stylistic choices, and ROAST them for it.
@@ -48,21 +151,31 @@ Output strictly as a JSON object with this exact schema:
   "code_quality_score": 55
 }`;
 
-    const response = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
+    const requestBody: OpenAI.Chat.ChatCompletionCreateParams = {
+      model,
       messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: code }
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: String(code) },
       ],
-      response_format: { type: "json_object" }
+      temperature: 0.4,
+    };
+
+    if (supportsStructuredOutput) {
+      requestBody.response_format = { type: 'json_object' };
+    }
+
+    const response = await client.chat.completions.create(requestBody);
+    const content = response.choices[0]?.message?.content ?? null;
+    const parsed = parseModelJson(content);
+
+    return NextResponse.json({
+      ...parsed,
+      provider,
+      model,
     });
-
-    const content = response.choices[0].message.content;
-    const parsed = JSON.parse(content || '{}');
-
-    return NextResponse.json(parsed);
-  } catch (error: any) {
-    console.error("Roast error:", error);
-    return NextResponse.json({ error: error.message }, { status: 500 });
+  } catch (error: unknown) {
+    console.error('Roast error:', error);
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }

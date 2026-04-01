@@ -108,7 +108,7 @@ export function renderSprite(comp: { species: string; eye: string; hat: string }
   const frames = BODIES[comp.species];
   if (!frames) return '';
   const f = frame % frames.length;
-  let lines = [...frames[f]].map(l => l.replace(/E/g, comp.eye));
+  const lines = [...frames[f]].map(l => l.replace(/E/g, comp.eye));
   if (comp.hat !== 'none' && !lines[0].trim()) {
     lines[0] = HATS[comp.hat] || '';
   }
