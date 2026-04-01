@@ -1,0 +1,5 @@
+openai
+watchdog
+rich
+pygame
+python-dotenv

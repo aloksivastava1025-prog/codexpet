@@ -1,0 +1,19 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = "file:./dev.db"
+}
+
+model PetConfig {
+  id         String   @id @default(uuid())
+  token      String   @unique
+  species    String
+  roastLevel String   @default("max")
+  apiKey     String?
+  hat        String   @default("none")
+  eye        String   @default("o")
+  createdAt  DateTime @default(now())
+}
