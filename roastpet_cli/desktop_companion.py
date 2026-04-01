@@ -89,7 +89,29 @@ class DesktopCompanionApp:
 
         self.screen_w = self.root.winfo_screenwidth()
         self.screen_h = self.root.winfo_screenheight()
-        self.root.geometry(f"250x190+{self.screen_w - 340}+{self.screen_h - 320}")
+        self.root.geometry(f"320x270+{self.screen_w - 380}+{self.screen_h - 380}")
+
+        self.message_frame = tk.Frame(
+            self.root,
+            bg="#141414",
+            highlightbackground="#2a2a2a",
+            highlightthickness=1,
+            bd=0,
+        )
+        self.message_frame.place(x=16, y=8, width=288, height=72)
+
+        self.message_label = tk.Label(
+            self.message_frame,
+            text="",
+            justify="center",
+            wraplength=260,
+            fg="#e8e4d8",
+            bg="#141414",
+            font=("Segoe UI", 9, "italic"),
+            padx=10,
+            pady=8,
+        )
+        self.message_label.pack(fill="both", expand=True)
 
         self.shadow_label = tk.Label(
             self.root,
@@ -102,7 +124,7 @@ class DesktopCompanionApp:
             padx=14,
             pady=10,
         )
-        self.shadow_label.place(x=6, y=6)
+        self.shadow_label.place(x=36, y=98)
 
         self.pet_label = tk.Label(
             self.root,
@@ -115,25 +137,7 @@ class DesktopCompanionApp:
             padx=14,
             pady=10,
         )
-        self.pet_label.place(x=0, y=0)
-
-        self.bubble = tk.Toplevel(self.root)
-        self.bubble.overrideredirect(True)
-        self.bubble.attributes("-topmost", True)
-        self.bubble.configure(bg="#141414")
-        self.bubble.withdraw()
-        self.bubble_label = tk.Label(
-            self.bubble,
-            text="",
-            justify="center",
-            wraplength=220,
-            fg="#e8e4d8",
-            bg="#141414",
-            font=("Segoe UI", 9, "italic"),
-            padx=12,
-            pady=8,
-        )
-        self.bubble_label.pack()
+        self.pet_label.place(x=30, y=92)
 
         self.menu = tk.Menu(self.root, tearoff=0, bg="#141414", fg="#e8e4d8", activebackground="#2a1f0a", activeforeground="#f0a035")
         self.menu.add_command(label="Pet", command=self.pet)
@@ -186,15 +190,11 @@ class DesktopCompanionApp:
         return "\n".join(body)
 
     def _show_bubble(self, text: str):
-        self.bubble_label.config(text=text)
-        self.bubble.update_idletasks()
-        x = self.root.winfo_x() - 20
-        y = self.root.winfo_y() - self.bubble.winfo_reqheight() - 10
-        self.bubble.geometry(f"+{max(0, x)}+{max(0, y)}")
-        self.bubble.deiconify()
+        self.message_label.config(text=text)
+        self.message_frame.lift()
         if self.bubble_after_id:
             self.root.after_cancel(self.bubble_after_id)
-        self.bubble_after_id = self.root.after(6000, self.bubble.withdraw)
+        self.bubble_after_id = self.root.after(9000, lambda: self.message_label.config(text=""))
 
     def set_bubble(self, text: str, speak: bool = False, notify: bool = False):
         self._show_bubble(text)
@@ -253,8 +253,8 @@ class DesktopCompanionApp:
             next_x = self.screen_w - width
             self.direction = -1
         self.root.geometry(f"+{int(next_x)}+{int(y)}")
-        if self.bubble.state() == "normal":
-            self._show_bubble(self.bubble_label.cget("text"))
+        if self.message_label.cget("text"):
+            self._show_bubble(self.message_label.cget("text"))
 
     def _reset_to_visible_position(self):
         x = max(20, self.screen_w - 340)
@@ -274,8 +274,8 @@ class DesktopCompanionApp:
         dy = event.y_root - sy
         self.root.geometry(f"+{wx + dx}+{wy + dy}")
         self.ground_y = wy + dy
-        if self.bubble.state() == "normal":
-            self._show_bubble(self.bubble_label.cget("text"))
+        if self.message_label.cget("text"):
+            self._show_bubble(self.message_label.cget("text"))
 
     def stop_drag(self, _event):
         self.drag_start = None
@@ -645,7 +645,7 @@ class DesktopCompanionApp:
         update_pet_presence(self.token, self.soul["species"], "desktop", "offline", backend_url=self.backend_url)
         release_instance(self.lock_path)
         try:
-            self.bubble.destroy()
+            self.message_frame.destroy()
         except Exception:
             pass
         self.root.destroy()

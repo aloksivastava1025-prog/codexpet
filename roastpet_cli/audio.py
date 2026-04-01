@@ -2,32 +2,13 @@ import os
 import subprocess
 import tempfile
 import time
+import ctypes
 import winsound
 
 import pygame
 
 from backend_client import fetch_voice_audio
 from companion_memory import get_settings
-from pet_voice import get_meme_line
-
-PET_SOUND_STYLES = {
-    "duck": "boing",
-    "rabbit": "sparkle",
-    "snail": "idle",
-    "blob": "boing",
-    "cat": "idle",
-    "penguin": "sparkle",
-    "ghost": "oops",
-    "mushroom": "idle",
-    "owl": "idle",
-    "turtle": "idle",
-    "axolotl": "sparkle",
-    "robot": "victory",
-    "dragon": "victory",
-    "octopus": "boing",
-    "capybara": "idle",
-    "chonk": "boing",
-}
 
 PET_VOICE_RATES = {
     "duck": 1,
@@ -92,7 +73,7 @@ def speak_text(
     if selected_mode == "mute":
         return False
     if selected_mode == "beep":
-        play_funny_sound(PET_SOUND_STYLES.get(species, "boing"))
+        play_funny_sound("oops")
         return True
 
     if selected_mode != "ai" or not token:
@@ -139,8 +120,7 @@ def _speak_with_windows_voice(text: str, species: str = "duck"):
         )
         return True
     except Exception:
-        play_funny_sound(PET_SOUND_STYLES.get(species, "boing"))
-        return True
+        return False
 
 
 def play_funny_sound(style: str = "boing"):
@@ -162,14 +142,8 @@ def play_species_signature(species: str):
     base_dir = os.path.dirname(os.path.abspath(__file__))
     custom_path = os.path.join(base_dir, "audio", f"{species}.mp3")
     if os.path.exists(custom_path):
-        try:
-            init_audio()
-            pygame.mixer.music.load(custom_path)
-            pygame.mixer.music.play()
-            return
-        except Exception:
-            pass
-    play_funny_sound(PET_SOUND_STYLES.get(species, "boing"))
+        return _play_local_audio_file(custom_path)
+    return False
 
 
 def play_sound(
@@ -181,28 +155,38 @@ def play_sound(
     base_dir = os.path.dirname(os.path.abspath(__file__))
     custom_path = os.path.join(base_dir, "audio", f"{sound_name}.mp3")
     if os.path.exists(custom_path):
-        try:
-            init_audio()
-            pygame.mixer.music.load(custom_path)
-            pygame.mixer.music.play()
-            return True
-        except Exception:
-            pass
-    meme_line = get_meme_line(sound_name, species)
-    spoken = speak_text(
-        meme_line,
-        species=species,
-        token=token,
-        backend_url=backend_url,
-        mode="meme",
-    )
-    if spoken:
+        return _play_local_audio_file(custom_path)
+    return False
+
+
+def _play_local_audio_file(path: str):
+    if _play_with_winmm(path):
         return True
-    style = {
-        "bruh": "oops",
-        "womp": "oops",
-        "emotional": "boing",
-        "none": "idle",
-    }.get(sound_name, "sparkle")
-    play_funny_sound(style)
-    return True
+
+    try:
+        init_audio()
+        pygame.mixer.music.load(path)
+        pygame.mixer.music.play()
+        return True
+    except Exception:
+        pass
+
+    return False
+
+
+def _play_with_winmm(path: str):
+    # Prefer the native Windows media path for local meme MP3s because pygame
+    # may report "playing" even when the user hears nothing on some setups.
+    try:
+        alias = f"roastpet_{int(time.time() * 1000)}"
+        winmm = ctypes.windll.winmm
+        open_result = winmm.mciSendStringW(f'open "{path}" type mpegvideo alias {alias}', None, 0, None)
+        if open_result != 0:
+            return False
+        play_result = winmm.mciSendStringW(f"play {alias}", None, 0, None)
+        if play_result != 0:
+            winmm.mciSendStringW(f"close {alias}", None, 0, None)
+            return False
+        return True
+    except Exception:
+        return False

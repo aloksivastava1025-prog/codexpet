@@ -87,6 +87,7 @@ class FileChangeHandler(FileSystemEventHandler):
                 self.cooldown_until = time.time() + 20
                 self.ui.set_state("idle")
                 self.ui.set_ambient("Too many roast requests at once. I am taking a short cooldown so we do not melt the mothership.", speak=True)
+                play_sound("womp", species=self.ui.species, token=self.token, backend_url=self.ui.backend_url)
                 self.ui.notify("Cooldown mode for 20s. Too many roast requests fired at once.")
                 return
             roast_text = result.get("roast", "I have no words for this code.")
@@ -130,3 +131,5 @@ class FileChangeHandler(FileSystemEventHandler):
         except Exception as e:
             self.ui.set_roast(f"Roast engine failure: {e}")
             self.ui.set_state("idle")
+            play_sound("womp", species=self.ui.species, token=self.token, backend_url=self.ui.backend_url)
+            self.ui.set_ambient("That was a certified silly mistake moment. I played the emergency clown sound.", speak=True)
