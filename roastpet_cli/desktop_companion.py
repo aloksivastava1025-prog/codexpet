@@ -15,8 +15,10 @@ from audio import play_sound, play_species_signature, speak_text
 from backend_client import (
     fetch_companion_reply,
     fetch_pet_config,
+    fetch_proactive_nudge,
     plan_remote_command,
     poll_remote_command,
+    update_pet_config,
     update_pet_presence,
     update_remote_command_status,
 )
@@ -102,6 +104,7 @@ class DesktopCompanionApp:
         self.cli_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "cli.py"))
         self.known_mtimes = {}
         self.last_analysis_at = 0.0
+        self.last_proactive_at = 0.0
         self.ears_enabled = bool(np is not None and sd is not None and sr is not None)
         self.ear_pause_until = 0.0
         self.ear_status = "on" if self.ears_enabled else "off"
@@ -356,11 +359,20 @@ class DesktopCompanionApp:
             return "en-US"
         return "hi-IN"
 
+    def _recognition_languages(self):
+        primary = self._recognition_language()
+        fallbacks = ["hi-IN", "en-US"]
+        ordered = [primary]
+        for item in fallbacks:
+            if item not in ordered:
+                ordered.append(item)
+        return ordered
+
     def _wake_words(self):
         species_name = str(self.soul.get("species") or "").lower()
         return {"buddy", "gojo", species_name}
 
-    def _capture_transcript(self, seconds: float = 3.6):
+    def _capture_transcript(self, seconds: float = 4.6):
         if not self._ears_supported():
             return ""
         sample_rate = 16000
@@ -388,9 +400,22 @@ class DesktopCompanionApp:
                 wav_file.writeframes(recording.tobytes())
 
             recognizer = sr.Recognizer()
+            recognizer.dynamic_energy_threshold = True
             with sr.AudioFile(temp_path) as source:
                 audio = recognizer.record(source)
-            return recognizer.recognize_google(audio, language=self._recognition_language())
+            attempts = []
+            for language in self._recognition_languages():
+                try:
+                    transcript = recognizer.recognize_google(audio, language=language)
+                    cleaned = " ".join((transcript or "").split()).strip()
+                    if cleaned:
+                        attempts.append(cleaned)
+                except sr.UnknownValueError:
+                    continue
+            if attempts:
+                attempts.sort(key=len, reverse=True)
+                return attempts[0]
+            return ""
         except sr.UnknownValueError:
             return ""
         except sr.RequestError:
@@ -433,6 +458,38 @@ class DesktopCompanionApp:
             return cleaned
         return None
 
+    def _apply_local_voice_command(self, message: str):
+        lowered = " ".join((message or "").split()).strip().lower()
+        if not lowered:
+            return False
+        target_language = None
+        if any(phrase in lowered for phrase in ["speak in english", "english me bolo", "english mein bolo", "switch to english", "language english"]):
+            target_language = "english"
+        elif any(phrase in lowered for phrase in ["speak in hindi", "hindi me bolo", "hindi mein bolo", "switch to hindi", "language hindi"]):
+            target_language = "hindi"
+        elif any(phrase in lowered for phrase in ["speak in hinglish", "hinglish me bolo", "hinglish mein bolo", "switch to hinglish", "language hinglish"]):
+            target_language = "hinglish"
+
+        if not target_language:
+            return False
+
+        result = update_pet_config(
+            self.token,
+            {"conversationLanguage": target_language},
+            backend_url=self.backend_url,
+        )
+        self.config["conversationLanguage"] = (result or {}).get("conversationLanguage", target_language)
+        reply_map = {
+            "english": "Okay, I will talk in English now.",
+            "hindi": "Theek hai, ab main Hindi mein baat karunga.",
+            "hinglish": "Theek hai, ab Hinglish pe aa gaya hoon.",
+        }
+        reply_text = reply_map[target_language]
+        self._append_conversation("master", message)
+        self._append_conversation("buddy", reply_text)
+        self.root.after(0, lambda text=reply_text: self.set_bubble(text, speak=True, notify=False))
+        return True
+
     def _append_conversation(self, role: str, text: str):
         updated = append_conversation(self.token, role, text, limit=8)
         self.conversation_history = deque(updated, maxlen=8)
@@ -459,6 +516,9 @@ class DesktopCompanionApp:
                 self._append_conversation("master", "Buddy")
                 self._append_conversation("buddy", reply_text)
                 self.root.after(0, lambda text=reply_text: self.set_bubble(text, speak=True, notify=False))
+                continue
+            if self._apply_local_voice_command(message):
+                self.root.after(0, lambda: self._set_ear_status("Listening..."))
                 continue
             self._append_conversation("master", message)
             context = self._build_command_context(message)
@@ -610,13 +670,37 @@ class DesktopCompanionApp:
             time.sleep(random.randint(35, 70))
             if not self.running:
                 break
-            bond = int(get_session_memory(self.token).get("bond", 0))
-            line = get_boredom_breaker(self.soul["species"], bond)
-            if random.random() < 0.4:
-                line = get_focus_nudge(self.soul["species"], 0)
-            if random.random() < 0.22:
-                line = self._repo_summary()
+            line = self._generate_autonomous_line()
             self.root.after(0, lambda text=line: self.set_bubble(text, speak=True, notify=True))
+
+    def _generate_autonomous_line(self):
+        bond = int(get_session_memory(self.token).get("bond", 0))
+        fallback = get_boredom_breaker(self.soul["species"], bond)
+        if random.random() < 0.35:
+            fallback = get_focus_nudge(self.soul["species"], len(self._git_dirty_files()))
+        if random.random() < 0.22:
+            fallback = self._repo_summary()
+
+        config = fetch_pet_config(self.token, backend_url=self.backend_url) or self.config
+        self.config = config
+        if not config.get("autonomousMode", True):
+            return fallback
+        if time.time() - self.last_proactive_at < 35:
+            return fallback
+        context = self._build_command_context("autonomous check-in")
+        recent = self._history_payload()
+        response = fetch_proactive_nudge(
+            self.token,
+            context=context,
+            recent_conversation=recent,
+            backend_url=self.backend_url,
+        )
+        line = (response or {}).get("nudge", "").strip()
+        if line:
+            self.last_proactive_at = time.time()
+            self._append_conversation("buddy", line)
+            return line
+        return fallback
 
     def _analysis_loop(self):
         while self.running:

@@ -16,6 +16,23 @@ def fetch_pet_config(token: str, backend_url="http://localhost:3000") -> dict | 
         return None
 
 
+def update_pet_config(token: str, updates: dict, backend_url="http://localhost:3000") -> dict | None:
+    url = f"{backend_url}/api/pets/{token}"
+    payload = json.dumps(updates).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="PATCH",
+    )
+    try:
+        with urllib.request.urlopen(req) as response:
+            body = response.read().decode("utf-8")
+            return json.loads(body)
+    except Exception:
+        return None
+
+
 def fetch_voice_audio(
     token: str,
     text: str,
@@ -62,6 +79,34 @@ def fetch_companion_reply(
             "message": message,
             "context": context,
             "history": history or [],
+        }
+    ).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req) as response:
+            body = response.read().decode("utf-8")
+            return json.loads(body)
+    except Exception:
+        return None
+
+
+def fetch_proactive_nudge(
+    token: str,
+    context: str = "",
+    recent_conversation: list[dict] | None = None,
+    backend_url="http://localhost:3000",
+):
+    url = f"{backend_url}/api/companion/proactive"
+    payload = json.dumps(
+        {
+            "token": token,
+            "context": context,
+            "recentConversation": recent_conversation or [],
         }
     ).encode("utf-8")
     req = urllib.request.Request(

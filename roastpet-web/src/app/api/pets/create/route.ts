@@ -7,7 +7,7 @@ import { getUserPetToken, setUserPetToken } from '@/lib/user-pet-registry';
 export async function POST(request: Request) {
   try {
     const body = await request.json();
-    const { username, roastLevel, apiKey, buddyPrompt, voiceProvider, voiceId, conversationLanguage } = body;
+    const { username, roastLevel, apiKey, buddyPrompt, voiceProvider, voiceId, conversationLanguage, autonomousMode } = body;
     const normalizedUsername = normalizeUsername(username);
     const finalBuddyPrompt =
       String(buddyPrompt || "").trim() ||
@@ -15,6 +15,7 @@ export async function POST(request: Request) {
     const finalVoiceProvider = String(voiceProvider || "cartesia").trim() || "cartesia";
     const finalVoiceId = String(voiceId || "779cb79a-59b0-45c6-b33b-ae46a39809be").trim() || "779cb79a-59b0-45c6-b33b-ae46a39809be";
     const finalConversationLanguage = String(conversationLanguage || "hinglish").trim().toLowerCase() || "hinglish";
+    const finalAutonomousMode = typeof autonomousMode === "boolean" ? autonomousMode : true;
 
     if (!normalizedUsername || !roastLevel) {
       return NextResponse.json({ error: 'Missing parameters' }, { status: 400 });
@@ -42,6 +43,7 @@ export async function POST(request: Request) {
             voiceProvider: finalVoiceProvider,
             voiceId: finalVoiceId,
             conversationLanguage: finalConversationLanguage,
+            autonomousMode: finalAutonomousMode,
           },
         });
       }
@@ -61,6 +63,7 @@ export async function POST(request: Request) {
           voiceProvider: finalVoiceProvider,
           voiceId: finalVoiceId,
           conversationLanguage: finalConversationLanguage,
+          autonomousMode: finalAutonomousMode,
         },
       });
       setUserPetToken(normalizedUsername, config.token);
@@ -83,6 +86,7 @@ export async function POST(request: Request) {
       voiceProvider: config.voiceProvider,
       voiceId: config.voiceId,
       conversationLanguage: config.conversationLanguage,
+      autonomousMode: config.autonomousMode,
     });
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : 'Unknown error';

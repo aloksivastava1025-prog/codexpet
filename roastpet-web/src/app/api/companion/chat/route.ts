@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import OpenAI from "openai";
 
+import { extractMemoryCandidates, mergeMemoryNotes, parseMemoryNotes, stringifyMemoryNotes } from "@/lib/companion-memory";
 import { prisma } from "@/lib/prisma";
 
 function buildClient(apiKey: string) {
@@ -97,6 +98,7 @@ export async function POST(request: Request) {
 
     const { client, model } = buildClient(apiKey);
     const customBehavior = String(config.buddyPrompt || "").trim();
+    const memoryNotes = parseMemoryNotes(config.memoryNotes);
     const historyMessages = Array.isArray(history)
       ? history
           .slice(-6)
@@ -120,6 +122,7 @@ Never sound like customer support.
 Never sound like a roleplay script.
 ${languageInstruction(config.conversationLanguage)}
 ${inferPersonalityInstruction(customBehavior || "Be stylish, egoist, friendly, funny, and loyal.")}
+Things you remember about the user: ${memoryNotes.length ? memoryNotes.join(" | ") : "No saved personal notes yet."}
 Custom behavior instruction from Master: ${customBehavior || "Be stylish, egoist, friendly, funny, and loyal."}`;
 
     const response = await client.chat.completions.create({
@@ -137,11 +140,24 @@ Custom behavior instruction from Master: ${customBehavior || "Be stylish, egoist
     });
 
     const reply = response.choices[0]?.message?.content?.trim() || buildFallbackReply(config.species, message);
+    const newMemoryCandidates = extractMemoryCandidates(String(message));
+    if (newMemoryCandidates.length) {
+      const mergedMemory = mergeMemoryNotes(memoryNotes, newMemoryCandidates);
+      if (JSON.stringify(mergedMemory) !== JSON.stringify(memoryNotes)) {
+        await prisma.petConfig.update({
+          where: { token },
+          data: {
+            memoryNotes: stringifyMemoryNotes(mergedMemory),
+          },
+        });
+      }
+    }
 
     return NextResponse.json({
       reply,
       provider: apiKey.startsWith("nvapi-") ? "nvidia" : "openai",
       model,
+      memoryNotes: newMemoryCandidates.length ? mergeMemoryNotes(memoryNotes, newMemoryCandidates) : memoryNotes,
     });
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "Unknown error";

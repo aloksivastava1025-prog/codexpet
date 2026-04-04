@@ -14,6 +14,7 @@ type HatchResponse = {
   voiceProvider?: string;
   voiceId?: string;
   conversationLanguage?: string;
+  autonomousMode?: boolean;
   starter: {
     species: string;
     hat: string;
@@ -100,6 +101,7 @@ type SavedBuddySession = {
   voiceProvider: string;
   voiceId: string;
   conversationLanguage: string;
+  autonomousMode: boolean;
   commandToken: string;
 };
 
@@ -171,6 +173,7 @@ export default function Page() {
   const [voiceProvider, setVoiceProvider] = useState("cartesia");
   const [voiceId, setVoiceId] = useState(GOJO_VOICE_ID);
   const [conversationLanguage, setConversationLanguage] = useState("hinglish");
+  const [autonomousMode, setAutonomousMode] = useState(true);
   const [commandToken, setCommandToken] = useState("");
   const [remoteCommand, setRemoteCommand] = useState("");
   const [chatMessage, setChatMessage] = useState("");
@@ -182,6 +185,7 @@ export default function Page() {
   const [remoteStatus, setRemoteStatus] = useState("");
   const [commandHistory, setCommandHistory] = useState<RemoteCommandStatus[]>([]);
   const [presence, setPresence] = useState<PetPresence | null>(null);
+  const [memoryNotes, setMemoryNotes] = useState<string[]>([]);
   const [shareLink, setShareLink] = useState<ShareLink | null>(null);
   const [listening, setListening] = useState(false);
   const [pendingVoiceCommand, setPendingVoiceCommand] = useState("");
@@ -217,6 +221,7 @@ export default function Page() {
       if (saved.voiceProvider) setVoiceProvider(saved.voiceProvider);
       if (saved.voiceId) setVoiceId(saved.voiceId);
       if (saved.conversationLanguage) setConversationLanguage(saved.conversationLanguage);
+      if (typeof saved.autonomousMode === "boolean") setAutonomousMode(saved.autonomousMode);
       if (saved.commandToken) setCommandToken(saved.commandToken);
       setSessionRestored(true);
     } catch {
@@ -234,10 +239,11 @@ export default function Page() {
       voiceProvider,
       voiceId,
       conversationLanguage,
+      autonomousMode,
       commandToken,
     };
     window.localStorage.setItem(BUDDY_SESSION_KEY, JSON.stringify(payload));
-  }, [username, apiKey, roastLevel, buddyPrompt, voiceProvider, voiceId, conversationLanguage, commandToken]);
+  }, [username, apiKey, roastLevel, buddyPrompt, voiceProvider, voiceId, conversationLanguage, autonomousMode, commandToken]);
 
   useEffect(() => {
     if (!anim) {
@@ -299,7 +305,7 @@ export default function Page() {
       const response = await fetch("/api/pets/create", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username, apiKey, roastLevel, buddyPrompt, voiceProvider, voiceId, conversationLanguage }),
+        body: JSON.stringify({ username, apiKey, roastLevel, buddyPrompt, voiceProvider, voiceId, conversationLanguage, autonomousMode }),
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || "Hatch failed");
@@ -310,6 +316,7 @@ export default function Page() {
       setVoiceProvider(hatchData.voiceProvider || voiceProvider);
       setVoiceId(hatchData.voiceId || voiceId);
       setConversationLanguage(hatchData.conversationLanguage || conversationLanguage);
+      setAutonomousMode(typeof hatchData.autonomousMode === "boolean" ? hatchData.autonomousMode : autonomousMode);
       setPreview((prev) => ({
         ...prev,
         species: hatchData.starter.species,
@@ -389,6 +396,7 @@ export default function Page() {
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || "Buddy chat failed");
       setChatHistory((prev) => [...prev, { role: "buddy", text: data.reply as string }]);
+      if (Array.isArray(data.memoryNotes)) setMemoryNotes(data.memoryNotes as string[]);
       setChatStatus("Buddy replied.");
       await speakBuddyReply(data.reply as string);
     } catch (err) {
@@ -639,6 +647,12 @@ export default function Page() {
                   <option value="english">english</option>
                   <option value="hindi">hindi</option>
                 </select>
+                <select value={autonomousMode ? "on" : "off"} onChange={(e) => setAutonomousMode(e.target.value === "on")}>
+                  <option value="on">autonomous on</option>
+                  <option value="off">autonomous off</option>
+                </select>
+              </div>
+              <div className="hatch-row">
                 <input value={buddyPrompt} onChange={(e) => setBuddyPrompt(e.target.value)} placeholder="buddy vibe prompt" />
               </div>
               <div className="result" style={{ marginBottom: ".9rem" }}>
@@ -710,6 +724,8 @@ export default function Page() {
                 <div style={{ marginTop: ".2rem" }}>Last note: {presence?.status || "No heartbeat yet."}</div>
                 <div style={{ marginTop: ".2rem" }}>Voice: {voiceProvider} ? {voiceId}</div>
                 <div style={{ marginTop: ".2rem" }}>Language: {conversationLanguage}</div>
+                <div style={{ marginTop: ".2rem" }}>Autonomous mode: {autonomousMode ? "on" : "off"}</div>
+                <div style={{ marginTop: ".2rem" }}>Memory notes: {memoryNotes.length ? memoryNotes.join(" | ") : "none yet"}</div>
               </div>
 
               {shareLink ? (

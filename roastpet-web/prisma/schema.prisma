@@ -19,5 +19,7 @@ model PetConfig {
   voiceProvider String @default("cartesia")
   voiceId     String? @default("779cb79a-59b0-45c6-b33b-ae46a39809be")
   conversationLanguage String @default("hinglish")
+  memoryNotes String? @default("[]")
+  autonomousMode Boolean @default(true)
   createdAt  DateTime @default(now())
 }

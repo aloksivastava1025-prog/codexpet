@@ -36,16 +36,29 @@ def init_audio():
 
 
 def _play_audio_bytes(audio_bytes: bytes, suffix: str):
-    init_audio()
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
         tmp.write(audio_bytes)
         tmp_path = tmp.name
 
     try:
+        lowered = suffix.lower()
+        if lowered == ".wav":
+            try:
+                winsound.PlaySound(tmp_path, winsound.SND_FILENAME)
+                return True
+            except Exception:
+                pass
+
+        if _play_with_winmm(tmp_path):
+            time.sleep(0.4)
+            return True
+
+        init_audio()
         pygame.mixer.music.load(tmp_path)
         pygame.mixer.music.play()
         while pygame.mixer.music.get_busy():
             time.sleep(0.1)
+        return True
     finally:
         try:
             pygame.mixer.music.unload()
@@ -93,8 +106,7 @@ def speak_text(
     suffix = ".wav" if "wav" in content_type else ".mp3"
 
     try:
-        _play_audio_bytes(voice_payload["audio"], suffix=suffix)
-        return True
+        return bool(_play_audio_bytes(voice_payload["audio"], suffix=suffix))
     except Exception as e:
         print(f"[*] AI voice playback error: {e}")
         return _speak_with_windows_voice(trimmed, species)
