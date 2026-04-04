@@ -15,5 +15,9 @@ model PetConfig {
   apiKey     String?
   hat        String   @default("none")
   eye        String   @default("o")
+  buddyPrompt String? @default("You are a stylish, egoist, friendly, funny coding buddy with smooth confidence and protective loyalty toward your Master.")
+  voiceProvider String @default("cartesia")
+  voiceId     String? @default("779cb79a-59b0-45c6-b33b-ae46a39809be")
+  conversationLanguage String @default("hinglish")
   createdAt  DateTime @default(now())
 }

@@ -5,18 +5,18 @@ VOICE_PROFILES = {
         "rate": 2,
         "intro": "quack-powered chaos gremlin",
         "idle": [
-            "Quack report. We should touch grass, but linting first.",
-            "I am emotionally available for one bug and three snacks.",
-            "Trainer, open a file. I crave dramatic code review.",
+            "Master, quack report. We should touch grass, but linting first.",
+            "Master, I am emotionally available for one bug and three snacks.",
+            "Master, open a file. I crave dramatic code review.",
         ],
     },
     "rabbit": {
         "rate": 3,
         "intro": "speedy panic wizard",
         "idle": [
-            "Hop to it, boss. Momentum beats overthinking.",
-            "I can feel a side quest forming in this codebase.",
-            "Tiny paws. Massive ambition. Let's ship something.",
+            "Master, hop to it. Momentum beats overthinking.",
+            "Master, I can feel a side quest forming in this codebase.",
+            "Tiny paws. Massive ambition. Let's ship something, Master.",
         ],
     },
     "snail": {
@@ -32,18 +32,18 @@ VOICE_PROFILES = {
         "rate": 0,
         "intro": "squishy hype orb",
         "idle": [
-            "I contain multitudes and at least one suspicious workaround.",
-            "Blob wisdom says small commits, big victories.",
-            "I am jiggling with confidence on your behalf.",
+            "Master, I contain multitudes and at least one suspicious workaround.",
+            "Blob wisdom says small commits, big victories, Master.",
+            "Master, I am jiggling with confidence on your behalf.",
         ],
     },
     "cat": {
         "rate": 1,
         "intro": "judgmental debugger",
         "idle": [
-            "I knocked your fragile assumptions off the table.",
-            "This code smells fixable. I respect that.",
-            "Purr if stable. Hiss if race condition.",
+            "Master, I knocked your fragile assumptions off the table.",
+            "Master, this code smells fixable. I respect that.",
+            "Purr if stable. Hiss if race condition, Master.",
         ],
     },
     "penguin": {
@@ -68,9 +68,9 @@ VOICE_PROFILES = {
         "rate": 1,
         "intro": "forest support mage",
         "idle": [
-            "A calm commit a day keeps the merge monster away.",
-            "I am here to keep the vibes fertile and the bugs afraid.",
-            "Let's grow one clean feature before the next chaos storm.",
+            "Master, a calm commit a day keeps the merge monster away.",
+            "I am here to keep the vibes fertile and the bugs afraid, Master.",
+            "Let's grow one clean feature before the next chaos storm, Master.",
         ],
     },
     "owl": {
@@ -113,9 +113,9 @@ VOICE_PROFILES = {
         "rate": -3,
         "intro": "final-evolution menace",
         "idle": [
-            "I smell technical debt and lightly toasted courage.",
-            "Another bug dares enter our territory. Adorable.",
-            "Raise your chin, trainer. We breathe fire at flaky code.",
+            "Master, I smell technical debt and lightly toasted courage.",
+            "Another bug dares enter our territory. Adorable, Master.",
+            "Raise your chin, Master. We breathe fire at flaky code.",
         ],
     },
     "octopus": {
@@ -176,27 +176,27 @@ def get_idle_line(species: str, level: int = 1) -> str:
 
 def get_intro_line(species: str) -> str:
     profile = get_voice_profile(species)
-    return f"{species.capitalize()} online. Voice profile: {profile['intro']}."
+    return f"{species.capitalize()} online. Main aa gaya. {profile['intro']} mode on."
 
 
 def get_meme_line(sound_name: str, species: str) -> str:
     meme = MEME_SPEECH.get(sound_name, "Maximum silliness engaged.")
-    return f"{species.capitalize()} says: {meme}"
+    return f"Master, {species.capitalize()} says: {meme}"
 
 
 def get_boredom_breaker(species: str, bond: int = 0) -> str:
     lines = [
-        "Pick a tiny mission. We only need one clean win.",
-        "You look under-stimulated. Want me to bully one TODO into submission?",
-        "Let's do a two-minute cleanup quest before the boredom monster evolves.",
-        "Trainer, choose one file. I will provide emotional backup and menace.",
+        "Chal ek tiny mission pakadte hain. Bas ek clean win chahiye.",
+        "Tu thoda bored lag raha hai. Ek TODO todte hain kya?",
+        "Do minute ka cleanup kar lete hain, phir flow aa jayega.",
+        "Ek file choose kar. Main saath hoon.",
     ]
     if bond >= 5:
-        lines.append("We've done this enough times that I can say it clearly: you always recover momentum.")
+        lines.append("Tu momentum hamesha wapas laata hai. Bas start kar.")
     return random.choice(lines)
 
 
 def get_focus_nudge(species: str, dirty_files: int = 0) -> str:
     if dirty_files > 0:
-        return f"{species.capitalize()} noticed {dirty_files} uncommitted changes. Tiny checkpoint time?"
-    return f"{species.capitalize()} is bored. Maybe inspect one flaky file before chaos wins."
+        return f"{species.capitalize()} ne {dirty_files} uncommitted changes pakde hain. Quick checkpoint karein?"
+    return f"{species.capitalize()} bored ho raha hai. Ek flaky file dekh lete hain?"

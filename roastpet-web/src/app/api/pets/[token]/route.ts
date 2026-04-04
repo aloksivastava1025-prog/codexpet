@@ -18,6 +18,10 @@ export async function GET(_: Request, context: { params: Promise<{ token: string
       hat: pet.hat,
       eye: pet.eye,
       roastLevel: pet.roastLevel,
+      buddyPrompt: pet.buddyPrompt,
+      voiceProvider: pet.voiceProvider,
+      voiceId: pet.voiceId,
+      conversationLanguage: pet.conversationLanguage,
       hasApiKey: Boolean(pet.apiKey),
     });
   } catch (error: unknown) {

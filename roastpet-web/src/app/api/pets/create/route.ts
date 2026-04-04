@@ -7,8 +7,14 @@ import { getUserPetToken, setUserPetToken } from '@/lib/user-pet-registry';
 export async function POST(request: Request) {
   try {
     const body = await request.json();
-    const { username, roastLevel, apiKey } = body;
+    const { username, roastLevel, apiKey, buddyPrompt, voiceProvider, voiceId, conversationLanguage } = body;
     const normalizedUsername = normalizeUsername(username);
+    const finalBuddyPrompt =
+      String(buddyPrompt || "").trim() ||
+      "You are a stylish, egoist, friendly, funny coding buddy with smooth confidence and protective loyalty toward your Master.";
+    const finalVoiceProvider = String(voiceProvider || "cartesia").trim() || "cartesia";
+    const finalVoiceId = String(voiceId || "779cb79a-59b0-45c6-b33b-ae46a39809be").trim() || "779cb79a-59b0-45c6-b33b-ae46a39809be";
+    const finalConversationLanguage = String(conversationLanguage || "hinglish").trim().toLowerCase() || "hinglish";
 
     if (!normalizedUsername || !roastLevel) {
       return NextResponse.json({ error: 'Missing parameters' }, { status: 400 });
@@ -32,6 +38,10 @@ export async function POST(request: Request) {
           data: {
             roastLevel,
             apiKey: apiKey || found.apiKey || null,
+            buddyPrompt: finalBuddyPrompt,
+            voiceProvider: finalVoiceProvider,
+            voiceId: finalVoiceId,
+            conversationLanguage: finalConversationLanguage,
           },
         });
       }
@@ -47,6 +57,10 @@ export async function POST(request: Request) {
           apiKey: apiKey || null,
           hat: starter.hat,
           eye: starter.eye,
+          buddyPrompt: finalBuddyPrompt,
+          voiceProvider: finalVoiceProvider,
+          voiceId: finalVoiceId,
+          conversationLanguage: finalConversationLanguage,
         },
       });
       setUserPetToken(normalizedUsername, config.token);
@@ -65,6 +79,10 @@ export async function POST(request: Request) {
         hat: config.hat,
         eye: config.eye,
       },
+      buddyPrompt: config.buddyPrompt,
+      voiceProvider: config.voiceProvider,
+      voiceId: config.voiceId,
+      conversationLanguage: config.conversationLanguage,
     });
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : 'Unknown error';

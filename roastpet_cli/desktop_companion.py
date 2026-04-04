@@ -1,20 +1,32 @@
 import argparse
+from collections import deque
 import math
 import os
 import random
 import re
 import subprocess
+import tempfile
 import threading
 import time
 import tkinter as tk
+import wave
 
 from audio import play_sound, play_species_signature, speak_text
-from backend_client import plan_remote_command, poll_remote_command, update_pet_presence, update_remote_command_status
+from backend_client import (
+    fetch_companion_reply,
+    fetch_pet_config,
+    plan_remote_command,
+    poll_remote_command,
+    update_pet_presence,
+    update_remote_command_status,
+)
 from code_scout import analyze_file, changed_files_since
 from companion_memory import (
     add_bond,
+    append_conversation,
     get_session_memory,
     get_settings,
+    get_recent_conversation,
     record_checkin,
     should_emit_line,
     should_surface_speak,
@@ -27,7 +39,19 @@ from pet_voice import get_boredom_breaker, get_focus_nudge, get_intro_line
 from rpg_engine import load_or_hatch_soul
 from sprites import BODIES, HAT_LINES
 
+try:
+    import numpy as np
+    import sounddevice as sd
+    import speech_recognition as sr
+except Exception:
+    np = None
+    sd = None
+    sr = None
+
 TRANSPARENT_COLOR = "#ff00ff"
+GOJO_BLUE = "#66c7ff"
+GOJO_BLUE_DARK = "#0f2036"
+GOJO_BLUE_BORDER = "#1f4d70"
 FLYING_SPECIES = {"dragon", "ghost", "owl", "axolotl"}
 SCOUT_EXTENSIONS = {".py", ".ts", ".tsx", ".js", ".jsx", ".json", ".md"}
 IGNORED_DIRS = {
@@ -61,6 +85,7 @@ class DesktopCompanionApp:
         self.watch_dir = watch_dir
         self.lock_path = claim_single_instance("desktop", token)
         self.soul = load_or_hatch_soul(token, backend_url=backend_url)
+        self.config = fetch_pet_config(token, backend_url=backend_url) or {}
         touch_session(token, self.soul["species"])
 
         self.running = True
@@ -77,6 +102,16 @@ class DesktopCompanionApp:
         self.cli_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "cli.py"))
         self.known_mtimes = {}
         self.last_analysis_at = 0.0
+        self.ears_enabled = bool(np is not None and sd is not None and sr is not None)
+        self.ear_pause_until = 0.0
+        self.ear_status = "on" if self.ears_enabled else "off"
+        self.ear_status_text = "Listening..." if self.ears_enabled else "Ears off"
+        self.conversation_open_until = 0.0
+        self.conversation_history = deque(get_recent_conversation(token, limit=8), maxlen=8)
+        self.slap_enabled = bool(np is not None and sd is not None)
+        self.last_slap_at = 0.0
+        self.slap_stream = None
+        self.last_knock_feedback_at = 0.0
 
         self.root = tk.Tk()
         self.root.overrideredirect(True)
@@ -93,8 +128,8 @@ class DesktopCompanionApp:
 
         self.message_frame = tk.Frame(
             self.root,
-            bg="#141414",
-            highlightbackground="#2a2a2a",
+            bg=GOJO_BLUE_DARK,
+            highlightbackground=GOJO_BLUE_BORDER,
             highlightthickness=1,
             bd=0,
         )
@@ -105,19 +140,38 @@ class DesktopCompanionApp:
             text="",
             justify="center",
             wraplength=260,
-            fg="#e8e4d8",
-            bg="#141414",
+            fg="#dff6ff",
+            bg=GOJO_BLUE_DARK,
             font=("Segoe UI", 9, "italic"),
             padx=10,
             pady=8,
         )
         self.message_label.pack(fill="both", expand=True)
 
+        self.ear_button = tk.Button(
+            self.root,
+            text="Ears Off",
+            command=self.toggle_ears,
+            fg=GOJO_BLUE,
+            bg=GOJO_BLUE_DARK,
+            activebackground="#17375a",
+            activeforeground="#eefaff",
+            relief="flat",
+            bd=1,
+            highlightthickness=1,
+            highlightbackground=GOJO_BLUE_BORDER,
+            font=("Segoe UI", 8, "bold"),
+            padx=8,
+            pady=2,
+            cursor="hand2",
+        )
+        self.ear_button.place(x=218, y=84, width=86, height=28)
+
         self.shadow_label = tk.Label(
             self.root,
             text="",
             justify="center",
-            fg="#111111",
+            fg="#0a1830",
             bg=TRANSPARENT_COLOR,
             font=("Courier New", 18, "bold"),
             bd=0,
@@ -130,7 +184,7 @@ class DesktopCompanionApp:
             self.root,
             text="",
             justify="center",
-            fg="#f4ead2",
+            fg=GOJO_BLUE,
             bg=TRANSPARENT_COLOR,
             font=("Courier New", 18, "bold"),
             bd=0,
@@ -139,11 +193,13 @@ class DesktopCompanionApp:
         )
         self.pet_label.place(x=30, y=92)
 
-        self.menu = tk.Menu(self.root, tearoff=0, bg="#141414", fg="#e8e4d8", activebackground="#2a1f0a", activeforeground="#f0a035")
+        self.menu = tk.Menu(self.root, tearoff=0, bg=GOJO_BLUE_DARK, fg="#dff6ff", activebackground="#17375a", activeforeground=GOJO_BLUE)
         self.menu.add_command(label="Pet", command=self.pet)
         self.menu.add_command(label="Ask", command=self.ask)
+        self.menu.add_command(label="Ears On", command=self.toggle_ears)
         self.menu.add_command(label="Scout Repo", command=self.scout_repo)
         self.menu.add_command(label="Meme", command=self.meme)
+        self.menu.add_command(label="Slap Sound On", command=self.toggle_slap)
         self.menu.add_command(label="Open Terminal", command=self.launch_terminal)
         self.voice_menu = tk.Menu(self.menu, tearoff=0, bg="#141414", fg="#e8e4d8", activebackground="#2a1f0a", activeforeground="#f0a035")
         self.voice_menu.add_command(label="Mute", command=lambda: self.set_voice_mode("mute"))
@@ -169,6 +225,7 @@ class DesktopCompanionApp:
         self.update_sprite()
         self.root.after(500, self.animate)
         self.root.after(1600, self.first_presence_ping)
+        self.root.after(1200, self._start_slap_detector)
 
         self.chatter_thread = threading.Thread(target=self._chatter_loop, daemon=True)
         self.chatter_thread.start()
@@ -178,6 +235,8 @@ class DesktopCompanionApp:
         self.remote_thread.start()
         self.presence_thread = threading.Thread(target=self._presence_loop, daemon=True)
         self.presence_thread.start()
+        self.ears_thread = threading.Thread(target=self._ears_loop, daemon=True)
+        self.ears_thread.start()
 
     def _render_sprite(self):
         frames = BODIES[self.soul["species"]]
@@ -200,9 +259,221 @@ class DesktopCompanionApp:
         self._show_bubble(text)
         record_checkin(self.token, text)
         if speak and should_surface_speak("desktop") and should_emit_line(self.token, text, "desktop"):
+            self.ear_pause_until = time.time() + max(2.5, min(8.0, len(text) / 16))
             speak_text(text, species=self.soul["species"], token=self.token, backend_url=self.backend_url, mode="ambient")
         if notify:
             send_desktop_nudge(f"RoastPet ({self.soul['species'].capitalize()})", text[:180])
+
+    def _set_ear_status(self, text: str):
+        self.ear_status_text = text
+        self._refresh_ear_ui()
+
+    def toggle_ears(self):
+        if not self._ears_supported():
+            self.set_bubble("Desktop ears need microphone packages first. I can add them, then I will listen anywhere.", speak=False, notify=True)
+            return
+        self.ears_enabled = not self.ears_enabled
+        self.ear_status = "on" if self.ears_enabled else "off"
+        label = "Ears Off" if self.ears_enabled else "Ears On"
+        try:
+            self.menu.entryconfig(2, label=label)
+        except Exception:
+            pass
+        if self.ears_enabled:
+            self.set_bubble("Ears on. Just say Buddy first, Master.", speak=True, notify=True)
+            self.ear_pause_until = time.time() + 1.5
+            self._set_ear_status("Listening...")
+        else:
+            self.set_bubble("Ears off. I will wait quietly till you call me again.", speak=False, notify=True)
+            self._set_ear_status("Ears off")
+        self._refresh_ear_ui()
+
+    def toggle_slap(self):
+        self.slap_enabled = not self.slap_enabled
+        try:
+            self.menu.entryconfig(5, label="Slap Sound Off" if self.slap_enabled else "Slap Sound On")
+        except Exception:
+            pass
+        state = "on" if self.slap_enabled else "off"
+        self.set_bubble(f"Slap mode {state}. Touchpad ke paas tap karke test kar sakte ho.", speak=False, notify=True)
+
+    def _start_slap_detector(self):
+        if not self.running or not self.slap_enabled or np is None or sd is None:
+            return
+        try:
+            self.slap_stream = sd.InputStream(
+                samplerate=16000,
+                channels=1,
+                dtype="int16",
+                blocksize=1024,
+                device=1,
+                callback=self._slap_audio_callback,
+            )
+            self.slap_stream.start()
+            self.set_bubble("Slap detector ready. Touchpad ke paas thoda sharp tap karke dekho.", speak=False, notify=False)
+        except Exception:
+            self.slap_stream = None
+
+    def _slap_audio_callback(self, indata, frames, callback_time, status):
+        if not self.running or not self.slap_enabled or np is None:
+            return
+        try:
+            peak = int(np.abs(indata).max())
+        except Exception:
+            return
+        now = time.time()
+        if peak > 2200 and (now - self.last_knock_feedback_at) > 1.0:
+            self.last_knock_feedback_at = now
+            self.root.after(0, lambda p=peak: self._show_knock_feedback(p))
+        if peak > 3600 and (now - self.last_slap_at) > 1.2:
+            self.last_slap_at = now
+            self.root.after(0, self._on_slap_detected)
+
+    def _show_knock_feedback(self, peak: int):
+        self.set_bubble(f"Knock suna... level {peak}. Thoda aur zor se tap karo.", speak=False, notify=False)
+
+    def _on_slap_detected(self):
+        play_sound("slap", species=self.soul["species"], token=self.token, backend_url=self.backend_url)
+        self.set_bubble("Oye. Laptop pe itna violence? Dramatic tha, maan gaya.", speak=False, notify=False)
+
+    def _refresh_ear_ui(self):
+        label = self.ear_status_text if self.ears_enabled else "Ears off"
+        bg = "#17375a" if self.ears_enabled else GOJO_BLUE_DARK
+        fg = "#eefaff" if self.ears_enabled else GOJO_BLUE
+        try:
+            self.ear_button.config(text=label, bg=bg, fg=fg)
+        except Exception:
+            pass
+
+    def _ears_supported(self):
+        return bool(np is not None and sd is not None and sr is not None)
+
+    def _recognition_language(self):
+        language = str(self.config.get("conversationLanguage") or "hinglish").lower()
+        if language == "hindi":
+            return "hi-IN"
+        if language == "english":
+            return "en-US"
+        return "hi-IN"
+
+    def _wake_words(self):
+        species_name = str(self.soul.get("species") or "").lower()
+        return {"buddy", "gojo", species_name}
+
+    def _capture_transcript(self, seconds: float = 3.6):
+        if not self._ears_supported():
+            return ""
+        sample_rate = 16000
+        try:
+            recording = sd.rec(int(seconds * sample_rate), samplerate=sample_rate, channels=1, dtype="int16")
+            sd.wait()
+        except Exception:
+            return ""
+
+        try:
+            level = float(np.abs(recording).mean()) if np is not None else 0.0
+            if level < 140:
+                return ""
+        except Exception:
+            pass
+
+        temp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+                temp_path = tmp.name
+            with wave.open(temp_path, "wb") as wav_file:
+                wav_file.setnchannels(1)
+                wav_file.setsampwidth(2)
+                wav_file.setframerate(sample_rate)
+                wav_file.writeframes(recording.tobytes())
+
+            recognizer = sr.Recognizer()
+            with sr.AudioFile(temp_path) as source:
+                audio = recognizer.record(source)
+            return recognizer.recognize_google(audio, language=self._recognition_language())
+        except sr.UnknownValueError:
+            return ""
+        except sr.RequestError:
+            self.root.after(0, lambda: self._set_ear_status("Net issue"))
+            return ""
+        except Exception:
+            return ""
+        finally:
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
+
+    def _extract_buddy_message(self, transcript: str):
+        cleaned = " ".join((transcript or "").split()).strip()
+        if not cleaned:
+            return None
+        lowered = cleaned.lower()
+        for wake in self._wake_words():
+            if lowered == wake:
+                self.conversation_open_until = time.time() + 35
+                return ""
+            if lowered.startswith(f"{wake} "):
+                self.conversation_open_until = time.time() + 35
+                return cleaned[len(wake):].strip(" ,.-:!?")
+            marker = f"{wake},"
+            if lowered.startswith(marker):
+                self.conversation_open_until = time.time() + 35
+                return cleaned[len(wake) + 1:].strip(" ,.-:!?")
+        for wake in self._wake_words():
+            idx = lowered.find(f" {wake} ")
+            if idx != -1:
+                self.conversation_open_until = time.time() + 35
+                return cleaned[idx + len(wake) + 1:].strip(" ,.-:!?")
+        if time.time() < self.conversation_open_until and len(cleaned.split()) >= 2:
+            return cleaned
+        if len(cleaned.split()) >= 4:
+            self.conversation_open_until = time.time() + 25
+            return cleaned
+        return None
+
+    def _append_conversation(self, role: str, text: str):
+        updated = append_conversation(self.token, role, text, limit=8)
+        self.conversation_history = deque(updated, maxlen=8)
+
+    def _history_payload(self):
+        return [{"role": item.get("role", "master"), "text": item.get("text", "")} for item in list(self.conversation_history)[-6:]]
+
+    def _ears_loop(self):
+        while self.running:
+            time.sleep(0.25)
+            if not self.running or not self.ears_enabled:
+                continue
+            if time.time() < self.ear_pause_until:
+                continue
+            self.root.after(0, lambda: self._set_ear_status("Listening..."))
+            transcript = self._capture_transcript()
+            if transcript:
+                self.root.after(0, lambda heard=transcript[:32]: self._set_ear_status(f"Heard: {heard}"))
+            message = self._extract_buddy_message(transcript)
+            if message is None:
+                continue
+            if not message:
+                reply_text = "Haan?"
+                self._append_conversation("master", "Buddy")
+                self._append_conversation("buddy", reply_text)
+                self.root.after(0, lambda text=reply_text: self.set_bubble(text, speak=True, notify=False))
+                continue
+            self._append_conversation("master", message)
+            context = self._build_command_context(message)
+            self.root.after(0, lambda: self._set_ear_status("Thinking..."))
+            reply = fetch_companion_reply(
+                self.token,
+                message,
+                context=context,
+                history=self._history_payload(),
+                backend_url=self.backend_url,
+            )
+            reply_text = (reply or {}).get("reply") or "Sun raha hoon, Master. Thoda aur clearly bolo."
+            self._append_conversation("buddy", reply_text)
+            self.root.after(0, lambda text=reply_text: self.set_bubble(text, speak=True, notify=False))
+            self.root.after(0, lambda: self._set_ear_status("Listening..."))
 
     def set_voice_mode(self, voice_mode: str):
         update_settings(voice_mode=voice_mode)
@@ -302,9 +573,8 @@ class DesktopCompanionApp:
         play_species_signature(self.soul["species"])
 
     def ask(self):
-        line = get_boredom_breaker(self.soul["species"], int(get_session_memory(self.token).get("bond", 0)))
-        self.set_bubble(line, speak=True)
-        play_species_signature(self.soul["species"])
+        self.set_bubble("Master, let me think for a second...", speak=False)
+        threading.Thread(target=self._ask_from_brain, daemon=True).start()
 
     def scout_repo(self):
         summary = self._repo_summary()
@@ -366,13 +636,32 @@ class DesktopCompanionApp:
             summary = analysis["summary"]
             self.root.after(0, lambda text=summary: self.set_bubble(text, speak=True, notify=False))
 
+    def _ask_from_brain(self):
+        bond = int(get_session_memory(self.token).get("bond", 0))
+        prompt = get_boredom_breaker(self.soul["species"], bond)
+        context = self._build_command_context("conversational repo help")
+        self._append_conversation("master", prompt)
+        reply = fetch_companion_reply(
+            self.token,
+            prompt,
+            context=context,
+            history=self._history_payload(),
+            backend_url=self.backend_url,
+        )
+        line = (reply or {}).get("reply") or prompt
+        self._append_conversation("buddy", line)
+        self.root.after(0, lambda text=line: self.set_bubble(text, speak=True, notify=False))
+
     def _presence_loop(self):
         while self.running:
+            latest_config = fetch_pet_config(self.token, backend_url=self.backend_url)
+            if latest_config:
+                self.config = latest_config
             update_pet_presence(
                 self.token,
                 self.soul["species"],
                 "desktop",
-                f"{self.soul['species']} visible on screen",
+                f"{self.soul['species']} visible on screen | ears {'on' if self.ears_enabled else 'off'}",
                 backend_url=self.backend_url,
             )
             time.sleep(5)
@@ -642,6 +931,12 @@ class DesktopCompanionApp:
 
     def close(self):
         self.running = False
+        try:
+            if self.slap_stream is not None:
+                self.slap_stream.stop()
+                self.slap_stream.close()
+        except Exception:
+            pass
         update_pet_presence(self.token, self.soul["species"], "desktop", "offline", backend_url=self.backend_url)
         release_instance(self.lock_path)
         try:

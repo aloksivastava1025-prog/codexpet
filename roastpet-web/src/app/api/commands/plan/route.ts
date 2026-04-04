@@ -2,6 +2,32 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import OpenAI from "openai";
 
+const RATE_LIMIT_WINDOW_MS = 60_000;
+const RATE_LIMIT_MAX_REQUESTS = 10;
+const rateLimitStore = new Map<string, number[]>();
+
+function getClientIp(request: Request) {
+  const forwardedFor = request.headers.get("x-forwarded-for");
+  if (forwardedFor) return forwardedFor.split(",")[0].trim();
+  const realIp = request.headers.get("x-real-ip");
+  if (realIp) return realIp.trim();
+  return "local";
+}
+
+function enforceRateLimit(key: string) {
+  const now = Date.now();
+  const windowStart = now - RATE_LIMIT_WINDOW_MS;
+  const recentRequests = (rateLimitStore.get(key) || []).filter((ts) => ts > windowStart);
+
+  if (recentRequests.length >= RATE_LIMIT_MAX_REQUESTS) {
+    const retryAfterMs = RATE_LIMIT_WINDOW_MS - (now - recentRequests[0]);
+    return { limited: true, retryAfterSeconds: Math.max(1, Math.ceil(retryAfterMs / 1000)) };
+  }
+  recentRequests.push(now);
+  rateLimitStore.set(key, recentRequests);
+  return { limited: false, retryAfterSeconds: 0 };
+}
+
 function buildClient(apiKey: string) {
   if (apiKey.startsWith("nvapi-")) {
     return {
@@ -40,6 +66,14 @@ export async function POST(request: Request) {
     const { token, text, context } = await request.json();
     if (!token || !text) {
       return NextResponse.json({ error: "Missing token or text." }, { status: 400 });
+    }
+
+    const rateLimit = enforceRateLimit(`${getClientIp(request)}:${token}:plan`);
+    if (rateLimit.limited) {
+      return NextResponse.json(
+        { action: "suggest", path: "", content: "", summary: "Command rate limit active. Please pause for a moment." },
+        { status: 429, headers: { "Retry-After": String(rateLimit.retryAfterSeconds) } }
+      );
     }
 
     const config = await prisma.petConfig.findUnique({

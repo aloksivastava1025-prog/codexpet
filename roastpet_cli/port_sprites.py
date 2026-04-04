@@ -30,6 +30,6 @@ EYE_OPTIONS = ['o', '-', '^', '>', '*', 'O', 'x', '<', '@']
         print(f'[-] Error: {str(e)}')
 
 if __name__ == '__main__':
-    ts_path = os.path.join(os.getcwd(), 'src', 'buddy', 'sprites.ts')
+    ts_path = os.path.join(os.getcwd(), 'roastpet-web', 'src', 'app', 'sprites.ts')
     py_path = os.path.join(os.getcwd(), 'roastpet_cli', 'sprites.py')
     convert(ts_path, py_path)

@@ -10,18 +10,18 @@ def get_memory_path():
 def load_memory():
     path = get_memory_path()
     if not os.path.exists(path):
-        return {"sessions": {}, "last_global_checkin": 0, "settings": {"voice_mode": "system", "speaker_surface": "desktop"}}
+        return {"sessions": {}, "last_global_checkin": 0, "settings": {"voice_mode": "ai", "speaker_surface": "desktop"}}
     try:
         with open(path, "r", encoding="utf-8") as f:
             memory = json.load(f)
             memory.setdefault("sessions", {})
             memory.setdefault("last_global_checkin", 0)
             settings = memory.setdefault("settings", {})
-            settings.setdefault("voice_mode", "system")
+            settings.setdefault("voice_mode", "ai")
             settings.setdefault("speaker_surface", "desktop")
             return memory
     except Exception:
-        return {"sessions": {}, "last_global_checkin": 0, "settings": {"voice_mode": "system", "speaker_surface": "desktop"}}
+        return {"sessions": {}, "last_global_checkin": 0, "settings": {"voice_mode": "ai", "speaker_surface": "desktop"}}
 
 
 def save_memory(memory: dict):
@@ -37,6 +37,7 @@ def touch_session(token: str, species: str):
     session["last_seen_at"] = time.time()
     session["session_count"] = int(session.get("session_count", 0)) + 1
     session.setdefault("bond", 0)
+    session.setdefault("conversation", [])
     save_memory(memory)
     return session
 
@@ -62,6 +63,27 @@ def add_bond(token: str, amount: int = 1):
 def get_session_memory(token: str):
     memory = load_memory()
     return memory.get("sessions", {}).get(token, {})
+
+
+def append_conversation(token: str, role: str, text: str, limit: int = 8):
+    cleaned = " ".join((text or "").split()).strip()
+    if not cleaned:
+        return []
+    memory = load_memory()
+    sessions = memory.setdefault("sessions", {})
+    session = sessions.setdefault(token, {})
+    convo = session.setdefault("conversation", [])
+    convo.append({"role": role, "text": cleaned, "at": time.time()})
+    session["conversation"] = convo[-limit:]
+    save_memory(memory)
+    return session["conversation"]
+
+
+def get_recent_conversation(token: str, limit: int = 6):
+    memory = load_memory()
+    session = memory.get("sessions", {}).get(token, {})
+    convo = session.get("conversation", [])
+    return convo[-limit:]
 
 
 def get_settings():

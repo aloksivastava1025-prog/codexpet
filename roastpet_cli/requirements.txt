@@ -3,3 +3,6 @@ watchdog
 rich
 pygame
 python-dotenv
+SpeechRecognition
+sounddevice
+numpy

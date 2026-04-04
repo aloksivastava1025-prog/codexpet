@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import Image from "next/image";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { BODIES, HATS, SPECIES, renderSprite } from "./sprites";
 
 type HatchResponse = {
@@ -9,6 +10,10 @@ type HatchResponse = {
   existingPet?: boolean;
   command: string;
   desktopCommand?: string;
+  buddyPrompt?: string;
+  voiceProvider?: string;
+  voiceId?: string;
+  conversationLanguage?: string;
   starter: {
     species: string;
     hat: string;
@@ -40,6 +45,7 @@ type BrowserSpeechWindow = Window & {
     onerror: (() => void) | null;
     onend: (() => void) | null;
     start: () => void;
+    stop?: () => void;
   };
   SpeechRecognition?: new () => {
     lang: string;
@@ -49,7 +55,19 @@ type BrowserSpeechWindow = Window & {
     onerror: (() => void) | null;
     onend: (() => void) | null;
     start: () => void;
+    stop?: () => void;
   };
+};
+
+type BrowserSpeechRecognitionInstance = {
+  lang: string;
+  interimResults: boolean;
+  maxAlternatives: number;
+  onresult: ((event: { results: { transcript: string }[][] }) => void) | null;
+  onerror: (() => void) | null;
+  onend: (() => void) | null;
+  start: () => void;
+  stop?: () => void;
 };
 
 type RemoteCommandStatus = {
@@ -67,6 +85,29 @@ type PetPresence = {
   lastSeenAt: string;
   status: string;
   online: boolean;
+};
+
+type BuddyChatEntry = {
+  role: "master" | "buddy";
+  text: string;
+};
+
+type SavedBuddySession = {
+  username: string;
+  apiKey: string;
+  roastLevel: string;
+  buddyPrompt: string;
+  voiceProvider: string;
+  voiceId: string;
+  conversationLanguage: string;
+  commandToken: string;
+};
+
+type ShareLink = {
+  token: string;
+  host: string;
+  shareUrl: string;
+  qrUrl: string;
 };
 
 const RARITIES = ["Common", "Uncommon", "Rare", "Epic", "Legendary"];
@@ -87,6 +128,9 @@ const ASK_LINES = [
   "Stack Overflow is just shared trauma with snippets.",
   "Your best bug fix is still ahead of you, trainer.",
 ];
+const DEFAULT_BUDDY_PROMPT = "You are a stylish, egoist, friendly, funny coding buddy with smooth confidence and protective loyalty toward your Master. Speak like a cool best friend with elite aura, playful teasing, and real warmth.";
+const GOJO_VOICE_ID = "779cb79a-59b0-45c6-b33b-ae46a39809be";
+const BUDDY_SESSION_KEY = "codexpet-buddy-session-v1";
 
 function hash(input: string) {
   let value = 5381;
@@ -123,11 +167,22 @@ export default function Page() {
   const [username, setUsername] = useState("devuser42");
   const [apiKey, setApiKey] = useState("");
   const [roastLevel, setRoastLevel] = useState("chaotic");
+  const [buddyPrompt, setBuddyPrompt] = useState(DEFAULT_BUDDY_PROMPT);
+  const [voiceProvider, setVoiceProvider] = useState("cartesia");
+  const [voiceId, setVoiceId] = useState(GOJO_VOICE_ID);
+  const [conversationLanguage, setConversationLanguage] = useState("hinglish");
   const [commandToken, setCommandToken] = useState("");
   const [remoteCommand, setRemoteCommand] = useState("");
+  const [chatMessage, setChatMessage] = useState("");
+  const [chatStatus, setChatStatus] = useState("");
+  const [chatHistory, setChatHistory] = useState<BuddyChatEntry[]>([]);
+  const [lastBuddyAudioUrl, setLastBuddyAudioUrl] = useState("");
+  const [buddyEarOn, setBuddyEarOn] = useState(false);
+  const [sessionRestored, setSessionRestored] = useState(false);
   const [remoteStatus, setRemoteStatus] = useState("");
   const [commandHistory, setCommandHistory] = useState<RemoteCommandStatus[]>([]);
   const [presence, setPresence] = useState<PetPresence | null>(null);
+  const [shareLink, setShareLink] = useState<ShareLink | null>(null);
   const [listening, setListening] = useState(false);
   const [pendingVoiceCommand, setPendingVoiceCommand] = useState("");
   const [rawTranscript, setRawTranscript] = useState("");
@@ -139,10 +194,50 @@ export default function Page() {
   const [anim, setAnim] = useState(false);
   const [frame, setFrame] = useState(0);
   const [askIndex, setAskIndex] = useState(0);
+  const buddyRecognitionRef = useRef<BrowserSpeechRecognitionInstance | null>(null);
+  const buddyAudioRef = useRef<HTMLAudioElement | null>(null);
+  const buddyProcessingRef = useRef(false);
+  const buddyAudioUnlockedRef = useRef(false);
 
   useEffect(() => {
     setPreview(previewFromUsername(username));
   }, [username]);
+
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const raw = window.localStorage.getItem(BUDDY_SESSION_KEY);
+      if (!raw) return;
+      const saved = JSON.parse(raw) as Partial<SavedBuddySession>;
+      if (saved.username) setUsername(saved.username);
+      if (saved.apiKey) setApiKey(saved.apiKey);
+      if (saved.roastLevel) setRoastLevel(saved.roastLevel);
+      if (saved.buddyPrompt) setBuddyPrompt(saved.buddyPrompt);
+      if (saved.voiceProvider) setVoiceProvider(saved.voiceProvider);
+      if (saved.voiceId) setVoiceId(saved.voiceId);
+      if (saved.conversationLanguage) setConversationLanguage(saved.conversationLanguage);
+      if (saved.commandToken) setCommandToken(saved.commandToken);
+      setSessionRestored(true);
+    } catch {
+      // ignore broken saved session
+    }
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const payload: SavedBuddySession = {
+      username,
+      apiKey,
+      roastLevel,
+      buddyPrompt,
+      voiceProvider,
+      voiceId,
+      conversationLanguage,
+      commandToken,
+    };
+    window.localStorage.setItem(BUDDY_SESSION_KEY, JSON.stringify(payload));
+  }, [username, apiKey, roastLevel, buddyPrompt, voiceProvider, voiceId, conversationLanguage, commandToken]);
 
   useEffect(() => {
     if (!anim) {
@@ -178,6 +273,23 @@ export default function Page() {
     return () => window.clearInterval(timer);
   }, [commandToken]);
 
+  useEffect(() => {
+    if (!commandToken) {
+      setShareLink(null);
+      return;
+    }
+    void (async () => {
+      try {
+        const response = await fetch(`/api/system/share-url?token=${encodeURIComponent(commandToken)}`);
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "QR generation failed");
+        setShareLink(data as ShareLink);
+      } catch {
+        setShareLink(null);
+      }
+    })();
+  }, [commandToken]);
+
   const sprite = useMemo(() => renderSprite(preview, frame), [preview, frame]);
 
   async function hatch() {
@@ -187,13 +299,17 @@ export default function Page() {
       const response = await fetch("/api/pets/create", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username, apiKey, roastLevel }),
+        body: JSON.stringify({ username, apiKey, roastLevel, buddyPrompt, voiceProvider, voiceId, conversationLanguage }),
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || "Hatch failed");
       const hatchData = data as HatchResponse;
       setResult(hatchData);
       setCommandToken(hatchData.token);
+      setBuddyPrompt(hatchData.buddyPrompt || buddyPrompt);
+      setVoiceProvider(hatchData.voiceProvider || voiceProvider);
+      setVoiceId(hatchData.voiceId || voiceId);
+      setConversationLanguage(hatchData.conversationLanguage || conversationLanguage);
       setPreview((prev) => ({
         ...prev,
         species: hatchData.starter.species,
@@ -253,6 +369,157 @@ export default function Page() {
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || "Interpretation failed");
     return data as { cleanedCommand: string; detectedLanguage: string; confidence: number };
+  }
+
+
+  async function talkToBuddy(messageText: string) {
+    const finalText = messageText.trim();
+    if (!commandToken || !finalText) return;
+    const nextHistory = [...chatHistory.slice(-6), { role: "master" as const, text: finalText }];
+    buddyProcessingRef.current = true;
+    setChatStatus("Buddy is thinking...");
+    setChatHistory((prev) => [...prev, { role: "master", text: finalText }]);
+    setChatMessage("");
+    try {
+      const response = await fetch("/api/companion/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: commandToken, message: finalText, history: nextHistory }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Buddy chat failed");
+      setChatHistory((prev) => [...prev, { role: "buddy", text: data.reply as string }]);
+      setChatStatus("Buddy replied.");
+      await speakBuddyReply(data.reply as string);
+    } catch (err) {
+      setChatStatus(err instanceof Error ? err.message : "Buddy chat failed");
+      buddyProcessingRef.current = false;
+      if (buddyEarOn) window.setTimeout(() => startBuddyListeningLoop(), 400);
+    }
+  }
+
+  async function unlockBuddyAudio() {
+    if (buddyAudioUnlockedRef.current) return true;
+    try {
+      const audio = new Audio("data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=");
+      audio.muted = true;
+      await audio.play();
+      audio.pause();
+      buddyAudioUnlockedRef.current = true;
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async function speakBuddyReply(reply: string) {
+    if (!commandToken || !reply.trim()) {
+      buddyProcessingRef.current = false;
+      return;
+    }
+    try {
+      await unlockBuddyAudio();
+      const response = await fetch("/api/voice", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: commandToken, text: reply, species: preview.species, mode: "ambient" }),
+      });
+      if (!response.ok) throw new Error("Voice playback unavailable.");
+      const blob = await response.blob();
+      const audioUrl = URL.createObjectURL(blob);
+      setLastBuddyAudioUrl(audioUrl);
+      if (buddyAudioRef.current) buddyAudioRef.current.pause();
+      const audio = new Audio(audioUrl);
+      audio.playsInline = true;
+      buddyAudioRef.current = audio;
+      audio.onended = () => {
+        buddyProcessingRef.current = false;
+        if (buddyEarOn) window.setTimeout(() => startBuddyListeningLoop(), 350);
+      };
+      audio.onerror = () => {
+        setChatStatus("Voice blocked by browser. Use the play bar below once.");
+        buddyProcessingRef.current = false;
+        if (buddyEarOn) window.setTimeout(() => startBuddyListeningLoop(), 350);
+      };
+      await audio.play();
+    } catch {
+      setChatStatus("Buddy replied, but browser blocked voice autoplay. Use the play bar below.");
+      buddyProcessingRef.current = false;
+      if (buddyEarOn) window.setTimeout(() => startBuddyListeningLoop(), 350);
+    }
+  }
+
+  async function testBuddyVoice() {
+    const unlocked = await unlockBuddyAudio();
+    if (!unlocked) {
+      setChatStatus("Browser audio unlock failed. Tap again or check site permissions.");
+      return;
+    }
+    setChatStatus("Buddy voice unlocked. Ab text bhejo, awaaz aayegi.");
+  }
+
+  function stopBuddyListeningLoop() {
+    setBuddyEarOn(false);
+    setListening(false);
+    buddyProcessingRef.current = false;
+    try {
+      buddyRecognitionRef.current?.stop();
+    } catch {
+      // ignore stop failure
+    }
+    buddyRecognitionRef.current = null;
+    setChatStatus("Buddy ears off.");
+  }
+
+  function startBuddyListeningLoop() {
+    if (!buddyEarOn || buddyProcessingRef.current) return;
+    const browserWindow = window as BrowserSpeechWindow;
+    const SpeechRecognitionCtor = browserWindow.webkitSpeechRecognition || browserWindow.SpeechRecognition;
+
+    if (!SpeechRecognitionCtor) {
+      setChatStatus("This browser does not support in-browser speech recognition.");
+      setBuddyEarOn(false);
+      return;
+    }
+
+    const recognition = new SpeechRecognitionCtor();
+    buddyRecognitionRef.current = recognition;
+    recognition.lang = conversationLanguage === "english" ? "en-US" : "hi-IN";
+    recognition.interimResults = false;
+    recognition.maxAlternatives = 1;
+    setListening(true);
+    setChatStatus("Buddy ears on. Bas bolo, Master...");
+
+    recognition.onresult = async (event) => {
+      const transcript = event.results?.[0]?.[0]?.transcript || "";
+      setListening(false);
+      if (!transcript.trim()) {
+        if (buddyEarOn) window.setTimeout(() => startBuddyListeningLoop(), 250);
+        return;
+      }
+      await talkToBuddy(transcript);
+    };
+
+    recognition.onerror = () => {
+      setListening(false);
+      if (buddyEarOn) window.setTimeout(() => startBuddyListeningLoop(), 700);
+    };
+
+    recognition.onend = () => {
+      setListening(false);
+      if (buddyEarOn && !buddyProcessingRef.current) window.setTimeout(() => startBuddyListeningLoop(), 350);
+    };
+
+    recognition.start();
+  }
+
+  function toggleBuddyVoiceChat() {
+    if (buddyEarOn) {
+      stopBuddyListeningLoop();
+      return;
+    }
+    setBuddyEarOn(true);
+    window.setTimeout(() => startBuddyListeningLoop(), 150);
   }
 
   function startVoiceCommand() {
@@ -319,6 +586,7 @@ export default function Page() {
         <div className="eyebrow">April 2026 — Now hatching</div>
         <h1>Your deterministic<br /><em>coding buddy</em></h1>
         <p className="hero-sub">Website se token milega. Terminal me run karoge to wahi exact pet open hoga aur saare real companion kaam waha karega.</p>
+        {sessionRestored ? <div className="hero-eyebrow" style={{ marginTop: ".8rem" }}>Saved buddy session restored</div> : null}
         <div className="hero-actions">
           <a href="#app"><button className="btn btn-primary">Hatch your companion ↗</button></a>
           <a href="#how"><button className="btn btn-ghost">How it works</button></a>
@@ -356,6 +624,32 @@ export default function Page() {
                   <option value="chaotic">chaotic</option>
                   <option value="boss-battle">boss-battle</option>
                 </select>
+              </div>
+              <div className="hatch-row">
+                <select value={voiceProvider} onChange={(e) => setVoiceProvider(e.target.value)}>
+                  <option value="cartesia">cartesia</option>
+                  <option value="openai">openai</option>
+                  <option value="elevenlabs">elevenlabs</option>
+                </select>
+                <input value={voiceId} onChange={(e) => setVoiceId(e.target.value)} placeholder="voice id" />
+              </div>
+              <div className="hatch-row">
+                <select value={conversationLanguage} onChange={(e) => setConversationLanguage(e.target.value)}>
+                  <option value="hinglish">hinglish</option>
+                  <option value="english">english</option>
+                  <option value="hindi">hindi</option>
+                </select>
+                <input value={buddyPrompt} onChange={(e) => setBuddyPrompt(e.target.value)} placeholder="buddy vibe prompt" />
+              </div>
+              <div className="result" style={{ marginBottom: ".9rem" }}>
+                <div className="mono" style={{ color: "var(--amber)", marginBottom: ".5rem" }}>BUDDY SYSTEM PROMPT</div>
+                <textarea
+                  value={buddyPrompt}
+                  onChange={(e) => setBuddyPrompt(e.target.value)}
+                  placeholder="Tell your buddy how to behave..."
+                  style={{ width: "100%", minHeight: 120, background: "var(--surface2)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 8, padding: 12, resize: "vertical" }}
+                />
+                <div style={{ marginTop: ".45rem", color: "var(--text2)" }}>Suggested vibe: stylish egoist, friendly, funny man, elite aura, playful teasing, loyal to Master.</div>
               </div>
 
               <div className="comp-card">
@@ -414,6 +708,49 @@ export default function Page() {
                 <div>{presence?.online ? "Pet is online on your screen." : "Pet is offline or not connected yet."}</div>
                 <div style={{ marginTop: ".4rem" }}>Surface: {presence?.surface || "unknown"}</div>
                 <div style={{ marginTop: ".2rem" }}>Last note: {presence?.status || "No heartbeat yet."}</div>
+                <div style={{ marginTop: ".2rem" }}>Voice: {voiceProvider} ? {voiceId}</div>
+                <div style={{ marginTop: ".2rem" }}>Language: {conversationLanguage}</div>
+              </div>
+
+              {shareLink ? (
+                <div className="result">
+                  <div className="mono" style={{ color: "var(--amber)", marginBottom: ".5rem" }}>SCAN TO TALK FROM PHONE</div>
+                  <div>Same Wi-Fi pe phone se scan karo. Direct mobile buddy page khulega.</div>
+                  <div className="qr-card">
+                    <Image src={shareLink.qrUrl} alt="Buddy phone QR" width={220} height={220} className="qr-image" unoptimized />
+                    <div className="command" style={{ marginTop: ".85rem" }}>{shareLink.shareUrl}</div>
+                    <div style={{ marginTop: ".45rem", color: "var(--text2)", fontSize: "12px" }}>LAN host: {shareLink.host}:3000</div>
+                  </div>
+                </div>
+              ) : null}
+
+              <div className="result">
+                <div className="mono" style={{ color: "var(--amber)", marginBottom: ".5rem" }}>TALK TO BUDDY</div>
+                <div>Your buddy can listen from the website mic and reply like a friend.</div>
+                <div className="hatch-row" style={{ marginTop: ".8rem" }}>
+                  <input value={chatMessage} onChange={(e) => setChatMessage(e.target.value)} placeholder="Talk to your buddy..." onKeyDown={(e) => e.key === "Enter" && talkToBuddy(chatMessage)} />
+                  <button className="hatch-btn" onClick={() => talkToBuddy(chatMessage)}>Send</button>
+                </div>
+                <div className="hatch-row">
+                  <button className="hatch-btn" onClick={toggleBuddyVoiceChat}>{buddyEarOn ? "Buddy Ears Off" : "Buddy Ears On"}</button>
+                  <button className="hatch-btn" onClick={testBuddyVoice}>Unlock Voice</button>
+                </div>
+                {chatStatus ? <div className="command">{chatStatus}</div> : null}
+                {lastBuddyAudioUrl ? (
+                  <div className="command">
+                    <div style={{ marginBottom: ".4rem" }}><strong>Voice fallback</strong></div>
+                    <audio controls src={lastBuddyAudioUrl} style={{ width: "100%" }} />
+                  </div>
+                ) : null}
+                {chatHistory.length ? (
+                  <div className="command">
+                    {chatHistory.slice(-6).map((entry, index) => (
+                      <div key={`${entry.role}-${index}`} style={{ marginBottom: ".65rem" }}>
+                        <strong>{entry.role === "master" ? "Master" : "Buddy"}:</strong> {entry.text}
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
               </div>
 
               <div className="result">

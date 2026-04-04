@@ -48,6 +48,36 @@ def fetch_voice_audio(
         return None
 
 
+def fetch_companion_reply(
+    token: str,
+    message: str,
+    context: str = "",
+    history: list[dict] | None = None,
+    backend_url="http://localhost:3000",
+):
+    url = f"{backend_url}/api/companion/chat"
+    payload = json.dumps(
+        {
+            "token": token,
+            "message": message,
+            "context": context,
+            "history": history or [],
+        }
+    ).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req) as response:
+            body = response.read().decode("utf-8")
+            return json.loads(body)
+    except Exception:
+        return None
+
+
 def poll_remote_command(token: str, backend_url="http://localhost:3000"):
     url = f"{backend_url}/api/commands/poll?token={urllib.parse.quote(token)}"
     req = urllib.request.Request(url, headers={"Content-Type": "application/json"})
