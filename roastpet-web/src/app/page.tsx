@@ -100,6 +100,7 @@ type SavedBuddySession = {
   buddyPrompt: string;
   voiceProvider: string;
   voiceId: string;
+  voicePreset: string;
   conversationLanguage: string;
   autonomousMode: boolean;
   commandToken: string;
@@ -132,7 +133,18 @@ const ASK_LINES = [
 ];
 const DEFAULT_BUDDY_PROMPT = "You are a stylish, egoist, friendly, funny coding buddy with smooth confidence and protective loyalty toward your Master. Speak like a cool best friend with elite aura, playful teasing, and real warmth.";
 const GOJO_VOICE_ID = "779cb79a-59b0-45c6-b33b-ae46a39809be";
+const PETER_GRIFFIN_VOICE_ID = "b1b5e8f7-9d63-4997-9864-92054ae22a92";
+const VOICE_PRESETS: Record<string, { label: string; voiceId: string }> = {
+  gojo: { label: "Gojo", voiceId: GOJO_VOICE_ID },
+  peter: { label: "Peter Griffin", voiceId: PETER_GRIFFIN_VOICE_ID },
+};
 const BUDDY_SESSION_KEY = "codexpet-buddy-session-v1";
+
+function voicePresetFromId(voiceId: string) {
+  const normalized = String(voiceId || "").trim();
+  const entry = Object.entries(VOICE_PRESETS).find(([, value]) => value.voiceId === normalized);
+  return entry?.[0] || "custom";
+}
 
 function hash(input: string) {
   let value = 5381;
@@ -172,6 +184,7 @@ export default function Page() {
   const [buddyPrompt, setBuddyPrompt] = useState(DEFAULT_BUDDY_PROMPT);
   const [voiceProvider, setVoiceProvider] = useState("cartesia");
   const [voiceId, setVoiceId] = useState(GOJO_VOICE_ID);
+  const [voicePreset, setVoicePreset] = useState(voicePresetFromId(GOJO_VOICE_ID));
   const [conversationLanguage, setConversationLanguage] = useState("hinglish");
   const [autonomousMode, setAutonomousMode] = useState(true);
   const [commandToken, setCommandToken] = useState("");
@@ -220,6 +233,8 @@ export default function Page() {
       if (saved.buddyPrompt) setBuddyPrompt(saved.buddyPrompt);
       if (saved.voiceProvider) setVoiceProvider(saved.voiceProvider);
       if (saved.voiceId) setVoiceId(saved.voiceId);
+      if (saved.voicePreset) setVoicePreset(saved.voicePreset);
+      else if (saved.voiceId) setVoicePreset(voicePresetFromId(saved.voiceId));
       if (saved.conversationLanguage) setConversationLanguage(saved.conversationLanguage);
       if (typeof saved.autonomousMode === "boolean") setAutonomousMode(saved.autonomousMode);
       if (saved.commandToken) setCommandToken(saved.commandToken);
@@ -238,12 +253,13 @@ export default function Page() {
       buddyPrompt,
       voiceProvider,
       voiceId,
+      voicePreset,
       conversationLanguage,
       autonomousMode,
       commandToken,
     };
     window.localStorage.setItem(BUDDY_SESSION_KEY, JSON.stringify(payload));
-  }, [username, apiKey, roastLevel, buddyPrompt, voiceProvider, voiceId, conversationLanguage, autonomousMode, commandToken]);
+  }, [username, apiKey, roastLevel, buddyPrompt, voiceProvider, voiceId, voicePreset, conversationLanguage, autonomousMode, commandToken]);
 
   useEffect(() => {
     if (!anim) {
@@ -315,6 +331,7 @@ export default function Page() {
       setBuddyPrompt(hatchData.buddyPrompt || buddyPrompt);
       setVoiceProvider(hatchData.voiceProvider || voiceProvider);
       setVoiceId(hatchData.voiceId || voiceId);
+      setVoicePreset(voicePresetFromId(hatchData.voiceId || voiceId));
       setConversationLanguage(hatchData.conversationLanguage || conversationLanguage);
       setAutonomousMode(typeof hatchData.autonomousMode === "boolean" ? hatchData.autonomousMode : autonomousMode);
       setPreview((prev) => ({
@@ -328,6 +345,16 @@ export default function Page() {
       setError(err instanceof Error ? err.message : "Hatch failed");
     } finally {
       setLoading(false);
+    }
+  }
+
+  function applyVoicePreset(preset: string) {
+    setVoicePreset(preset);
+    if (preset === "custom") return;
+    const selected = VOICE_PRESETS[preset];
+    if (selected) {
+      setVoiceId(selected.voiceId);
+      setVoiceProvider("cartesia");
     }
   }
 
@@ -639,7 +666,20 @@ export default function Page() {
                   <option value="openai">openai</option>
                   <option value="elevenlabs">elevenlabs</option>
                 </select>
-                <input value={voiceId} onChange={(e) => setVoiceId(e.target.value)} placeholder="voice id" />
+                <select value={voicePreset} onChange={(e) => applyVoicePreset(e.target.value)}>
+                  <option value="gojo">Gojo</option>
+                  <option value="peter">Peter Griffin</option>
+                  <option value="custom">Custom voice</option>
+                </select>
+                <input
+                  value={voiceId}
+                  onChange={(e) => {
+                    const next = e.target.value;
+                    setVoiceId(next);
+                    setVoicePreset(voicePresetFromId(next));
+                  }}
+                  placeholder="voice id"
+                />
               </div>
               <div className="hatch-row">
                 <select value={conversationLanguage} onChange={(e) => setConversationLanguage(e.target.value)}>
@@ -722,7 +762,7 @@ export default function Page() {
                 <div>{presence?.online ? "Pet is online on your screen." : "Pet is offline or not connected yet."}</div>
                 <div style={{ marginTop: ".4rem" }}>Surface: {presence?.surface || "unknown"}</div>
                 <div style={{ marginTop: ".2rem" }}>Last note: {presence?.status || "No heartbeat yet."}</div>
-                <div style={{ marginTop: ".2rem" }}>Voice: {voiceProvider} ? {voiceId}</div>
+                <div style={{ marginTop: ".2rem" }}>Voice: {voiceProvider} / {voicePreset === "custom" ? "custom" : VOICE_PRESETS[voicePreset]?.label || "custom"} / {voiceId}</div>
                 <div style={{ marginTop: ".2rem" }}>Language: {conversationLanguage}</div>
                 <div style={{ marginTop: ".2rem" }}>Autonomous mode: {autonomousMode ? "on" : "off"}</div>
                 <div style={{ marginTop: ".2rem" }}>Memory notes: {memoryNotes.length ? memoryNotes.join(" | ") : "none yet"}</div>
